@@ -10489,6 +10489,7 @@ fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>)
         (" to its owner's hand", Zone::Hand, false, false, false),
         (" to their owner's hand", Zone::Hand, false, false, false),
         (" to their owners' hands", Zone::Hand, false, false, false),
+        (" to their hand", Zone::Hand, false, false, false),
         (" to your hand", Zone::Hand, false, false, false),
         // Graveyard destinations
         (
@@ -10595,6 +10596,7 @@ fn parse_leading_hand_return_destination(input: &str) -> OracleResult<'_, Return
         tag::<_, _, OracleError<'_>>("to its owner's hand "),
         tag("to their owner's hand "),
         tag("to their owners' hands "),
+        tag("to their hand "),
         tag("to your hand "),
     ))
     .parse(input)?;
@@ -14467,6 +14469,20 @@ mod tests {
             Effect::ChangeZoneAll {
                 origin: Some(Zone::Exile),
                 destination: Zone::Battlefield,
+                target: TargetFilter::ExiledBySource,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn return_leading_their_hand_all_exiled_with_source() {
+        let e = parse_effect("Return to their hand all cards they own exiled with it");
+        assert!(matches!(
+            e,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
                 target: TargetFilter::ExiledBySource,
                 ..
             }
