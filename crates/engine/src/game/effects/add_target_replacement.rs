@@ -147,7 +147,7 @@ mod tests {
         let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
             .valid_card(TargetFilter::SelfRef)
             .destination_zone(Zone::Graveyard);
-        repl.expires_at_eot = true;
+        repl.expiry = Some(RestrictionExpiry::EndOfTurn);
 
         let ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
@@ -164,7 +164,10 @@ mod tests {
 
         let obj = state.objects.get(&id).unwrap();
         assert_eq!(obj.replacement_definitions.iter_all().count(), 1);
-        assert!(obj.replacement_definitions[0].expires_at_eot);
+        assert_eq!(
+            obj.replacement_definitions[0].expiry,
+            Some(RestrictionExpiry::EndOfTurn)
+        );
         assert!(events.iter().any(|e| matches!(
             e,
             GameEvent::EffectResolved {

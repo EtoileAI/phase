@@ -1658,8 +1658,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(zone) = replacement.destination_zone {
                 d.push(("destination".into(), format!("{zone:?}")));
             }
-            if replacement.expires_at_eot {
-                d.push(("expires_at_eot".into(), "yes".into()));
+            if let Some(expiry) = &replacement.expiry {
+                d.push(("expiry".into(), format!("{expiry:?}")));
             }
         }
         Effect::GenericEffect {

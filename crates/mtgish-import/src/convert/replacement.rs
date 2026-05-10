@@ -9,7 +9,7 @@ use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef,
     DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, ManaReplacementScope,
     QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, TargetFilter,
+    ReplacementMode, RestrictionExpiry, TargetFilter,
 };
 use engine::types::card_type::Supertype;
 use engine::types::replacements::ReplacementEvent;
@@ -68,7 +68,6 @@ pub fn convert_as_enters(
         }
         let (condition, mode, exec) = build_replacement_exec(act, &valid_card)?;
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::ChangeZone,
             execute: Some(Box::new(exec)),
@@ -146,7 +145,6 @@ pub fn convert_replace_would_enter(
         }
         let (condition, mode, exec) = build_replacement_exec(act, &valid_card)?;
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::ChangeZone,
             execute: Some(Box::new(exec)),
@@ -207,7 +205,6 @@ pub fn convert_replace_would_deal_damage(
     for act in actions {
         let modification = damage_action_to_modification(act)?;
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::DamageDone,
             execute: None,
@@ -577,7 +574,6 @@ pub fn convert_replace_would_draw(
             },
         );
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::Draw,
             execute: Some(Box::new(exec)),
@@ -695,7 +691,6 @@ pub fn convert_replace_would_put_into_graveyard(
             },
         );
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(exec)),
@@ -765,7 +760,7 @@ pub fn convert_create_replace_would_put_into_graveyard_until(
 
     let mut replacement = replacements.remove(0);
     replacement.valid_card = Some(TargetFilter::SelfRef);
-    replacement.expires_at_eot = true;
+    replacement.expiry = Some(RestrictionExpiry::EndOfTurn);
 
     Ok(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
@@ -912,7 +907,6 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
             },
         );
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(exec)),
@@ -992,7 +986,6 @@ pub fn convert_replace_would_put_counters(
     for act in actions {
         let modification = counter_action_to_modification(act)?;
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::AddCounter,
             execute: None,
@@ -1152,7 +1145,6 @@ pub fn convert_replace_would_gain_life(
     for act in actions {
         let modification = gain_life_action_to_modification(act)?;
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::GainLife,
             execute: None,
@@ -1267,7 +1259,6 @@ fn try_build_may_cost_pair(
     };
 
     Ok(Some(ReplacementDefinition {
-        expires_at_eot: false,
         expiry: None,
         event: ReplacementEvent::ChangeZone,
         execute: execute.map(Box::new),
@@ -3057,7 +3048,7 @@ mod tests {
                 assert_eq!(target, TargetFilter::Any);
                 assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
                 assert_eq!(replacement.destination_zone, Some(Zone::Graveyard));
-                assert!(replacement.expires_at_eot);
+                assert_eq!(replacement.expiry, Some(RestrictionExpiry::EndOfTurn));
             }
             other => panic!("expected AddTargetReplacement, got {other:?}"),
         }

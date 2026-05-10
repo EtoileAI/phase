@@ -693,7 +693,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
         .destination_zone(Zone::Graveyard)
         .execute(exile_effect);
     repl.is_consumed = true;
-    repl.expires_at_eot = true;
+    repl.expiry = Some(RestrictionExpiry::EndOfTurn);
 
     Some(AbilityDefinition::new(
         kind,
@@ -801,7 +801,7 @@ fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> 
     }
 
     replacement.is_consumed = true;
-    replacement.expires_at_eot = true;
+    replacement.expiry = Some(RestrictionExpiry::EndOfTurn);
 
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
@@ -23437,7 +23437,10 @@ mod tests {
             Some(CombatDamageScope::CombatOnly)
         );
         assert!(replacement.is_consumed);
-        assert!(replacement.expires_at_eot);
+        assert_eq!(
+            replacement.expiry,
+            Some(crate::types::ability::RestrictionExpiry::EndOfTurn)
+        );
     }
 
     #[test]
@@ -23486,7 +23489,10 @@ mod tests {
             Some(CombatDamageScope::CombatOnly)
         );
         assert!(replacement.is_consumed);
-        assert!(replacement.expires_at_eot);
+        assert_eq!(
+            replacement.expiry,
+            Some(crate::types::ability::RestrictionExpiry::EndOfTurn)
+        );
     }
 
     #[test]
