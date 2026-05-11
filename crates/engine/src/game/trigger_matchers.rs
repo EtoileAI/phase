@@ -5417,4 +5417,109 @@ mod tests {
         };
         assert!(!match_crews(&wrong_event, &trigger, source, &state));
     }
+
+    /// Issue #311 — Undead Alchemist class. The matcher must consult
+    /// `valid_card.controller` together with `origin` so the trigger fires
+    /// only when an opponent's creature card moves from library to graveyard
+    /// (CR 109.5 + CR 603.6c). The user-reported softlock was the source's
+    /// own death (Battlefield → Graveyard, controller=You) erroneously
+    /// firing this trigger.
+    #[test]
+    fn changes_zone_undead_alchemist_excludes_self_battlefield_death() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(311),
+            PlayerId(0),
+            "Undead Alchemist".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = make_trigger(TriggerMode::ChangesZone);
+        trigger.origin = Some(Zone::Library);
+        trigger.destination = Some(Zone::Graveyard);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+
+        // (a) Source's OWN death (Battlefield → Graveyard, controller=You)
+        //     MUST NOT fire. This is the symptom the user reported.
+        let self_dying = GameEvent::ZoneChanged {
+            object_id: source,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                ..ZoneChangeRecord::test_minimal(source, Some(Zone::Battlefield), Zone::Graveyard)
+            }),
+        };
+        assert!(
+            !match_changes_zone(&self_dying, &trigger, source, &state),
+            "trigger must not fire on the source's own battlefield death"
+        );
+
+        // (b) The controller's OWN creature being milled (Library → Graveyard,
+        //     controller=You) MUST NOT fire (valid_card.controller=Opponent).
+        let own_milled = ObjectId(100);
+        let own_milled_event = GameEvent::ZoneChanged {
+            object_id: own_milled,
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                ..ZoneChangeRecord::test_minimal(own_milled, Some(Zone::Library), Zone::Graveyard)
+            }),
+        };
+        assert!(
+            !match_changes_zone(&own_milled_event, &trigger, source, &state),
+            "trigger must not fire on the controller's own milled creature"
+        );
+
+        // (c) An opponent's creature dying (Battlefield → Graveyard,
+        //     controller=Opponent) MUST NOT fire because the origin is
+        //     restricted to Library.
+        let opp_dying = ObjectId(101);
+        let opp_dying_event = GameEvent::ZoneChanged {
+            object_id: opp_dying,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(
+                    opp_dying,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
+            }),
+        };
+        assert!(
+            !match_changes_zone(&opp_dying_event, &trigger, source, &state),
+            "trigger must not fire when origin is Battlefield, not Library"
+        );
+
+        // (d) An opponent's creature card being milled (Library → Graveyard,
+        //     controller=Opponent) — the intended firing condition.
+        let opp_milled = ObjectId(102);
+        let opp_milled_event = GameEvent::ZoneChanged {
+            object_id: opp_milled,
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(opp_milled, Some(Zone::Library), Zone::Graveyard)
+            }),
+        };
+        assert!(
+            match_changes_zone(&opp_milled_event, &trigger, source, &state),
+            "trigger must fire when an opponent's creature card is milled"
+        );
+    }
 }

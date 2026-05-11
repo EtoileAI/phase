@@ -40,6 +40,7 @@ import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
 import { PayAmountChoiceUI } from "../components/mana/PayAmountChoiceUI.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
+import { UnhandledWaitingForModal } from "../components/modal/UnhandledWaitingForModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
 import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
 import { ModalFaceModal } from "../components/modal/ModalFaceModal.tsx";
@@ -701,6 +702,21 @@ function GamePageContent({
     [adapter],
   );
 
+  // Issue #311 safety net: when the engine emits a WaitingFor variant the
+  // frontend has no UI for, this handler is the user's escape hatch.
+  // - Online: concede (server forfeits the seat, opponents see GameOver).
+  // - AI / local: clear local state + navigate home (no opponent to notify).
+  const handleUnhandledExit = useCallback(() => {
+    if (isOnlineMode) {
+      handleConcede();
+      return;
+    }
+    if (gameId) {
+      clearGame(gameId);
+    }
+    navigate("/");
+  }, [isOnlineMode, gameId, handleConcede, navigate]);
+
   const isDragging = useUiStore((s) => s.isDragging);
   const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
   const inspectedObj =
@@ -1346,6 +1362,16 @@ function GamePageContent({
           gameStartedAt={gameStartedAt}
         />
       )}
+
+      {/* Issue #311: Fail-loud safety net for orphan WaitingFor states.
+          Renders only when (a) the engine is waiting on the local player
+          and (b) the WaitingFor type has no UI handler in the frontend.
+          Without this, an unknown WaitingFor would silently hang the game
+          with no way to escape — see UnhandledWaitingForModal for details. */}
+      <UnhandledWaitingForModal
+        onExit={handleUnhandledExit}
+        exitLabel={isOnlineMode ? "Concede game" : "Return to menu"}
+      />
     </div>
   );
 }

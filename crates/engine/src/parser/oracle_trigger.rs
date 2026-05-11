@@ -5556,13 +5556,26 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     Some((TriggerMode::CounterRemoved, def))
 }
 
-/// CR 700.4: Parse "is/are put into [possessive] graveyard [from zone]" patterns.
+/// CR 700.4 + CR 603.6c + CR 109.5: Parse "is/are put into [possessive] graveyard
+/// [from <origin-possessive>]" patterns.
+///
 /// Handles all forms:
 /// - "is put into a graveyard from anywhere" (no origin restriction)
 /// - "is put into a graveyard from the battlefield" (equivalent to "dies")
 /// - "is put into your graveyard [from your library]" (controller filter + optional origin)
 /// - "is put into an opponent's graveyard from anywhere" (opponent controller filter)
+/// - "is put into an opponent's graveyard from their library" (CR 109.5: "their"
+///   anaphor binds back to the previously named opponent — Undead Alchemist class)
+/// - "is put into a player's graveyard from any library" (Bloodchief Ascension class)
 /// - "are put into your graveyard from your library" (plural form for batched triggers)
+///
+/// The graveyard's possessive narrows `valid_card.controller` (CR 109.5: a card
+/// going into player P's graveyard is P's card). This is what `match_changes_zone`
+/// actually reads when deciding to fire — historically the possessive only set
+/// `valid_target`, which `match_changes_zone` ignores for ChangesZone, so the
+/// trigger fired for any card going to any graveyard. `valid_target` is also
+/// preserved so downstream effect resolution (e.g. `target: ParentTarget`) keeps
+/// the narrowed scope.
 fn try_parse_put_into_graveyard(
     subject: &TargetFilter,
     rest: &str,
@@ -5575,26 +5588,7 @@ fn try_parse_put_into_graveyard(
     .parse(rest)
     .ok()?;
 
-    // Parse the graveyard possessive: "a graveyard", "your graveyard", "an opponent's graveyard"
-    fn parse_graveyard_possessive(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
-        alt((
-            value(None, tag("a graveyard")),
-            value(
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
-                )),
-                tag("your graveyard"),
-            ),
-            value(
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                )),
-                tag("an opponent's graveyard"),
-            ),
-        ))
-        .parse(input)
-    }
-    let (after_gy, valid_target) = parse_graveyard_possessive.parse(after_verb).ok()?;
+    let (after_gy, possessive) = parse_graveyard_possessive.parse(after_verb).ok()?;
 
     // Parse optional "from [zone]" clause
     let after_gy = after_gy.trim_start();
@@ -5602,18 +5596,7 @@ fn try_parse_put_into_graveyard(
         value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
     {
         let after_from = after_from.trim_start();
-        // Use nom alt() for origin zone matching
-        fn parse_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
-            alt((
-                value(Some(Zone::Battlefield), tag("the battlefield")),
-                // CR 700.4: "from anywhere" means no origin restriction
-                value(None, tag("anywhere")),
-                value(Some(Zone::Library), tag("your library")),
-                value(Some(Zone::Hand), tag("your hand")),
-            ))
-            .parse(input)
-        }
-        parse_origin_zone
+        parse_graveyard_origin_zone
             .parse(after_from)
             .ok()
             .map(|(_, z)| z)
@@ -5623,13 +5606,67 @@ fn try_parse_put_into_graveyard(
         None
     };
 
+    let valid_card = match possessive.clone() {
+        Some(ctrl) => Some(add_controller(subject.clone(), ctrl)),
+        None => Some(subject.clone()),
+    };
+    let valid_target =
+        possessive.map(|ctrl| TargetFilter::Typed(TypedFilter::default().controller(ctrl)));
+
     let mut def = make_base();
     def.mode = TriggerMode::ChangesZone;
     def.destination = Some(Zone::Graveyard);
     def.origin = origin;
-    def.valid_card = Some(subject.clone());
+    def.valid_card = valid_card;
     def.valid_target = valid_target;
     Some((TriggerMode::ChangesZone, def))
+}
+
+/// CR 109.5: Parse the graveyard possessive in "put into [possessive] graveyard".
+/// Returns the controller scope of the graveyard's owner, or `None` for unowned
+/// ("a graveyard"). Shared by `try_parse_put_into_graveyard` and the batched
+/// "one or more" variant so the two parse paths stay in lockstep.
+fn parse_graveyard_possessive(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
+    alt((
+        value(None, tag("a graveyard")),
+        value(Some(ControllerRef::You), tag("your graveyard")),
+        value(
+            Some(ControllerRef::Opponent),
+            tag("an opponent's graveyard"),
+        ),
+        // CR 109.5: "their graveyard" is an anaphor; in every "put into [...]
+        // graveyard" pattern that uses it the antecedent is the opponent named
+        // earlier in the same clause (Undead Alchemist class).
+        value(Some(ControllerRef::Opponent), tag("their graveyard")),
+        // CR 109.5: "a player's graveyard" — Bloodchief Ascension class. Bare
+        // "a player" leaves controller unscoped (matches any).
+        value(None, tag("a player's graveyard")),
+    ))
+    .parse(input)
+}
+
+/// CR 603.6c + CR 109.5: Parse the origin zone for a put-into-graveyard trigger.
+/// Returns `Some(Zone)` for a constrained origin, or `None` for "anywhere".
+/// Shared by `try_parse_put_into_graveyard` and the batched variant.
+fn parse_graveyard_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
+    alt((
+        value(Some(Zone::Battlefield), tag("the battlefield")),
+        // CR 603.6c: "from anywhere" — no origin restriction; the trigger
+        // is explicitly NOT treated as a leaves-the-battlefield ability.
+        value(None, tag("anywhere")),
+        // Library origins: every possessive form maps to Zone::Library.
+        // CR 109.5: "their library" is an anaphor back to the graveyard's owner;
+        // "a player's library" / "any library" leave the owner unconstrained
+        // (the valid_card filter from the graveyard possessive already handles
+        // owner narrowing when present).
+        value(Some(Zone::Library), tag("your library")),
+        value(Some(Zone::Library), tag("their library")),
+        value(Some(Zone::Library), tag("an opponent's library")),
+        value(Some(Zone::Library), tag("a player's library")),
+        value(Some(Zone::Library), tag("any library")),
+        value(Some(Zone::Hand), tag("your hand")),
+    ))
+    .parse(input)
 }
 
 /// Parse "[subject] is/are put into [possessive] hand from [zone]" — dredge-style
@@ -5787,27 +5824,10 @@ fn try_parse_one_or_more_put_into_graveyard(
             return None;
         };
 
-        // Parse the graveyard possessive using nom alt()
-        // Reuse the same combinator as try_parse_put_into_graveyard
-        fn parse_gy_possessive_batch(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
-            alt((
-                value(None, tag("a graveyard")),
-                value(
-                    Some(TargetFilter::Typed(
-                        TypedFilter::default().controller(ControllerRef::You),
-                    )),
-                    tag("your graveyard"),
-                ),
-                value(
-                    Some(TargetFilter::Typed(
-                        TypedFilter::default().controller(ControllerRef::Opponent),
-                    )),
-                    tag("an opponent's graveyard"),
-                ),
-            ))
-            .parse(input)
-        }
-        let Ok((after_gy, valid_target)) = parse_gy_possessive_batch.parse(after_put) else {
+        // CR 109.5 + CR 603.6c: Shared graveyard possessive + origin combinators
+        // (see try_parse_put_into_graveyard) keep singular/batched paths in
+        // lockstep — every new possessive or origin form lives in one place.
+        let Ok((after_gy, possessive)) = parse_graveyard_possessive.parse(after_put) else {
             continue;
         };
 
@@ -5817,15 +5837,7 @@ fn try_parse_one_or_more_put_into_graveyard(
             value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
         {
             let after_from = after_from.trim_start();
-            fn parse_origin_zone_batch(input: &str) -> OracleResult<'_, Option<Zone>> {
-                alt((
-                    value(Some(Zone::Battlefield), tag("the battlefield")),
-                    value(None, tag("anywhere")),
-                    value(Some(Zone::Library), tag("your library")),
-                ))
-                .parse(input)
-            }
-            parse_origin_zone_batch
+            parse_graveyard_origin_zone
                 .parse(after_from)
                 .ok()
                 .map(|(_, z)| z)
@@ -5835,7 +5847,7 @@ fn try_parse_one_or_more_put_into_graveyard(
         };
 
         // Parse the subject type filter: "creature cards", "land cards", "cards"
-        let filter = if subject_text == "cards" {
+        let base_filter = if subject_text == "cards" {
             None
         } else if let Some(type_text) = subject_text.strip_suffix(" cards") {
             let (f, remainder) = parse_type_phrase(type_text);
@@ -5847,11 +5859,25 @@ fn try_parse_one_or_more_put_into_graveyard(
             continue;
         };
 
+        // CR 109.5: Merge the graveyard owner's controller scope into valid_card
+        // (the field `match_changes_zone` actually consults). valid_target is
+        // preserved for downstream effect targeting / displays.
+        let valid_card = match (base_filter, possessive.clone()) {
+            (Some(f), Some(ctrl)) => Some(add_controller(f, ctrl)),
+            (Some(f), None) => Some(f),
+            (None, Some(ctrl)) => {
+                Some(TargetFilter::Typed(TypedFilter::default().controller(ctrl)))
+            }
+            (None, None) => None,
+        };
+        let valid_target =
+            possessive.map(|ctrl| TargetFilter::Typed(TypedFilter::default().controller(ctrl)));
+
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZoneAll;
         def.destination = Some(Zone::Graveyard);
         def.origin = origin;
-        def.valid_card = filter;
+        def.valid_card = valid_card;
         def.valid_target = valid_target;
         def.batched = true;
         return Some((TriggerMode::ChangesZoneAll, def));
@@ -11505,12 +11531,116 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.origin, Some(Zone::Library));
         assert_eq!(def.destination, Some(Zone::Graveyard));
+        // CR 109.5: "your graveyard" narrows valid_card.controller (the field
+        // match_changes_zone actually consults) — not just valid_target.
+        if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        } else {
+            panic!(
+                "Expected Typed valid_card with controller=You, got {:?}",
+                def.valid_card
+            );
+        }
         assert_eq!(
             def.valid_target,
             Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::You)
             ))
         );
+    }
+
+    /// Regression for issue #311: Undead Alchemist class. "Whenever a creature
+    /// card is put into an opponent's graveyard from their library" must:
+    ///   - set origin = Library (CR 603.6c: from-library zone constraint)
+    ///   - set valid_card.controller = Opponent (CR 109.5: "their" anaphor
+    ///     binds back to the previously named opponent; valid_card is the field
+    ///     match_changes_zone consults).
+    ///     Without these, the trigger fires when the controller's own creatures go
+    ///     from battlefield to graveyard — the user-reported softlock chain.
+    #[test]
+    fn trigger_put_into_opponent_graveyard_from_their_library() {
+        let def = parse_trigger_line(
+            "Whenever a creature card is put into an opponent's graveyard from their library, exile that card.",
+            "Undead Alchemist",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Library));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::Opponent),
+                "valid_card.controller must be Opponent so the trigger does not \
+                 fire on the source's own death"
+            );
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "Expected Creature type filter, got {:?}",
+                tf.type_filters
+            );
+        } else {
+            panic!(
+                "Expected Typed valid_card with controller=Opponent, got {:?}",
+                def.valid_card
+            );
+        }
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    /// CR 109.5 + CR 700.4: Bloodchief Ascension class — "an opponent's
+    /// graveyard from anywhere". `origin = None` (no zone restriction) but
+    /// `valid_card.controller = Opponent` so the trigger only fires for cards
+    /// owned by an opponent.
+    #[test]
+    fn trigger_put_into_opponent_graveyard_from_anywhere() {
+        let def = parse_trigger_line(
+            "Whenever a card is put into an opponent's graveyard from anywhere, you gain 1 life.",
+            "Bloodchief Ascension",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, None);
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
+            assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        } else {
+            panic!(
+                "Expected Typed valid_card with controller=Opponent, got {:?}",
+                def.valid_card
+            );
+        }
+    }
+
+    /// CR 109.5: "a player's graveyard from any library" — owner-unscoped form.
+    /// Both possessives leave `valid_card.controller` and `origin` constrained
+    /// only on the side that matters: origin=Library (CR 603.6c) but no
+    /// controller filter on the card (since "a player" / "any" cover all).
+    #[test]
+    fn trigger_put_into_any_player_graveyard_from_any_library() {
+        let def = parse_trigger_line(
+            "Whenever a creature card is put into a player's graveyard from any library, draw a card.",
+            "Spelltracker",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Library));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
+            assert_eq!(tf.controller, None, "Expected no controller scope");
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "Expected Creature type filter, got {:?}",
+                tf.type_filters
+            );
+        } else {
+            panic!(
+                "Expected Typed valid_card with controller=None, got {:?}",
+                def.valid_card
+            );
+        }
     }
 
     #[test]
@@ -11530,12 +11660,20 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::You)
             ))
         );
-        // Subject filter should be creature type
+        // CR 109.5: Subject filter must carry both the creature type AND the
+        // owner-narrowed controller scope so the matcher fires only for the
+        // controller's cards.
         if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
             assert!(
                 tf.type_filters.contains(&TypeFilter::Creature),
                 "Expected Creature in type_filters, got {:?}",
                 tf.type_filters
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "Expected controller=You merged from 'your graveyard', got {:?}",
+                tf.controller
             );
         } else {
             panic!("Expected Typed creature filter, got {:?}", def.valid_card);
@@ -11648,8 +11786,14 @@ mod tests {
         assert_eq!(def.origin, None);
         assert_eq!(def.destination, Some(Zone::Graveyard));
         assert!(def.batched);
-        // "cards" with no type restriction should have no valid_card filter
-        assert_eq!(def.valid_card, None);
+        // "your graveyard" scopes the affected cards to the controller even
+        // when "cards" carries no additional type restriction.
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You)
+            ))
+        );
     }
 
     #[test]
