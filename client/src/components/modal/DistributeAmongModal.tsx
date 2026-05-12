@@ -6,11 +6,12 @@ import type { DistributionUnit, TargetRef, WaitingFor } from "../../adapter/type
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { targetLabel } from "./targetRef.ts";
+import { formatCounterType } from "../../viewmodel/cardProps.ts";
 
 type DistributeAmong = Extract<WaitingFor, { type: "DistributeAmong" }>;
 
 function unitLabel(unit: DistributionUnit): string {
-  if (unit.type === "Counters") return `${unit.data} counter`;
+  if (unit.type === "Counters") return `${formatCounterType(unit.data)} counter`;
   return unit.type === "Damage" ? "damage" : "life";
 }
 
