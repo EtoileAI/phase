@@ -5653,6 +5653,31 @@ fn normalize_for_matching(lower: &str, card_name_lower: &str) -> String {
     result
 }
 
+fn split_trigger_variants(norm: &str) -> Option<Vec<String>> {
+    let variants = [
+        (" enters or dies,", " enters,", " dies,"),
+        (
+            " enters or leaves the battlefield,",
+            " enters,",
+            " leaves the battlefield,",
+        ),
+        (
+            " enters or is put into a graveyard from the battlefield,",
+            " enters,",
+            " is put into a graveyard from the battlefield,",
+        ),
+    ];
+    for (needle, first, second) in variants {
+        if norm.contains(needle) {
+            return Some(vec![
+                norm.replacen(needle, first, 1),
+                norm.replacen(needle, second, 1),
+            ]);
+        }
+    }
+    None
+}
+
 /// Per-line audit of a single card: match Oracle lines to parsed elements and check properties.
 fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> {
     let mut findings = Vec::new();
@@ -5756,7 +5781,8 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         let norm = normalize_for_matching(&effective_lower, &card_name_lower);
 
         // --- Match this line to parsed element(s) ---
-        let matched: Vec<&ParsedElement<'_>> = elements
+        let mut matched_via_split = false;
+        let mut matched: Vec<&ParsedElement<'_>> = elements
             .iter()
             .filter(|e| {
                 if let Some(desc) = e.description_lower() {
@@ -5775,6 +5801,26 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 }
             })
             .collect();
+        if matched.is_empty() {
+            if let Some(variants) = split_trigger_variants(&norm) {
+                let split_matched: Vec<&ParsedElement<'_>> = variants
+                    .iter()
+                    .filter_map(|variant| {
+                        elements.iter().find(|e| {
+                            e.description_lower().is_some_and(|desc| {
+                                let desc_norm = normalize_for_matching(&desc, &card_name_lower);
+                                desc_norm.contains(variant.as_str())
+                                    || variant.contains(desc_norm.as_str())
+                            })
+                        })
+                    })
+                    .collect();
+                if split_matched.len() == variants.len() {
+                    matched = split_matched;
+                    matched_via_split = true;
+                }
+            }
+        }
 
         // Check if this line's text matches any modal mode_description.
         // Collects matching mode abilities so property checks (duration, pump,
@@ -6217,8 +6263,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 && matched
                     .iter()
                     .all(|e| matches!(e, ParsedElement::Replacement(_)));
-            let any_has_condition = matched.iter().any(|e| e.has_condition() || e.has_unless())
-                || modal_any(&|d: &AbilityDefinition| d.condition.is_some());
+            let any_has_condition = if matched_via_split {
+                matched.iter().all(|e| e.has_condition() || e.has_unless())
+            } else {
+                matched.iter().any(|e| e.has_condition() || e.has_unless())
+                    || modal_any(&|d: &AbilityDefinition| d.condition.is_some())
+            };
             if !any_has_condition
                 && !covered_by_casting
                 && !all_replacements
@@ -6235,15 +6285,19 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
 
         // 2. Duration check: does Oracle text contain duration language?
         if let Some(dur_label) = line_has_duration_text(&lower) {
-            let any_has_duration = matched.iter().any(|e| e.has_duration())
-                || modal_any(&|d: &AbilityDefinition| d.duration.is_some())
-                // Fallback: for saga chapter lines, the matched element may be a static
-                // but the duration lives on the trigger's execute ability. Check all triggers.
-                || face.triggers.iter().any(|t| {
-                    t.execute
-                        .as_ref()
-                        .is_some_and(|e| ability_tree_any(e, &|d| d.duration.is_some()))
-                });
+            let any_has_duration = if matched_via_split {
+                matched.iter().all(|e| e.has_duration())
+            } else {
+                matched.iter().any(|e| e.has_duration())
+                    || modal_any(&|d: &AbilityDefinition| d.duration.is_some())
+                    // Fallback: for saga chapter lines, the matched element may be a static
+                    // but the duration lives on the trigger's execute ability. Check all triggers.
+                    || face.triggers.iter().any(|t| {
+                        t.execute
+                            .as_ref()
+                            .is_some_and(|e| ability_tree_any(e, &|d| d.duration.is_some()))
+                    })
+            };
             if !any_has_duration {
                 findings.push(SemanticFinding::DroppedDuration {
                     oracle_line: line.to_string(),
@@ -6287,10 +6341,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                             if toughness >= 0 { "+" } else { "" },
                             toughness
                         ));
-                    let any_has_counter = matched.iter().any(|e| e.has_counter_effect(&normalized))
-                        || modal_any(&|d: &AbilityDefinition| {
-                            ability_places_counter(d, &normalized)
-                        });
+                    let any_has_counter = if matched_via_split {
+                        matched.iter().all(|e| e.has_counter_effect(&normalized))
+                    } else {
+                        matched.iter().any(|e| e.has_counter_effect(&normalized))
+                            || modal_any(&|d: &AbilityDefinition| {
+                                ability_places_counter(d, &normalized)
+                            })
+                    };
                     if !any_has_counter {
                         findings.push(SemanticFinding::WrongParameter {
                             oracle_line: line.to_string(),
@@ -6307,8 +6365,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     }
                 }
             } else {
-                let any_has_pump = matched.iter().any(|e| e.has_pump(power, toughness))
-                    || modal_any(&|d: &AbilityDefinition| pump_matches_oracle(d, power, toughness));
+                let any_has_pump = if matched_via_split {
+                    matched.iter().all(|e| e.has_pump(power, toughness))
+                } else {
+                    matched.iter().any(|e| e.has_pump(power, toughness))
+                        || modal_any(&|d: &AbilityDefinition| {
+                            pump_matches_oracle(d, power, toughness)
+                        })
+                };
                 if !any_has_pump {
                     findings.push(SemanticFinding::WrongParameter {
                         oracle_line: line.to_string(),
@@ -8400,6 +8464,27 @@ mod tests {
         assert_eq!(
             normalize_for_matching("when this battle enters", ""),
             "when ~ enters"
+        );
+    }
+
+    #[test]
+    fn test_split_trigger_variants_for_combined_zone_triggers() {
+        assert_eq!(
+            split_trigger_variants("when ~ enters or dies, mill three cards.").unwrap(),
+            vec![
+                "when ~ enters, mill three cards.".to_string(),
+                "when ~ dies, mill three cards.".to_string()
+            ]
+        );
+        assert_eq!(
+            split_trigger_variants(
+                "when ~ enters or is put into a graveyard from the battlefield, draw a card."
+            )
+            .unwrap(),
+            vec![
+                "when ~ enters, draw a card.".to_string(),
+                "when ~ is put into a graveyard from the battlefield, draw a card.".to_string()
+            ]
         );
     }
 
