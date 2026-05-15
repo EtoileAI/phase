@@ -3185,6 +3185,304 @@ mod tests {
     }
 
     #[test]
+    fn optional_triggering_source_zone_move_survives_optional_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tergrid".to_string(),
+            Zone::Battlefield,
+        );
+        let victim_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Sacrificed Creature".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&victim_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::PermanentSacrificed {
+            object_id: victim_id,
+            player_id: PlayerId(1),
+        });
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::TriggeringSource,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: true,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        ability.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        state.current_trigger_event = None;
+
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        let victim = state.objects.get(&victim_id).unwrap();
+        assert_eq!(victim.zone, Zone::Battlefield);
+        assert_eq!(victim.controller, PlayerId(0));
+        assert!(!state.players[1].graveyard.contains(&victim_id));
+    }
+
+    #[test]
+    fn tergrid_style_sacrifice_trigger_reanimates_sacrificed_permanent() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tergrid".to_string(),
+            Zone::Battlefield,
+        );
+        let victim_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Sacrificed Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&victim_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = crate::types::ability::TriggerDefinition::new(
+            crate::types::triggers::TriggerMode::Sacrificed,
+        )
+        .optional();
+        trigger.valid_card = Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Permanent],
+            controller: Some(ControllerRef::Opponent),
+            properties: vec![FilterProp::NonToken],
+        }));
+        trigger.execute = Some(Box::new(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::TriggeringSource,
+                    owner_library: false,
+                    enter_transformed: false,
+                    under_your_control: true,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            )
+            .optional(),
+        ));
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        let mut events = Vec::new();
+        crate::game::sacrifice::sacrifice_permanent(
+            &mut state,
+            victim_id,
+            PlayerId(1),
+            &mut events,
+        )
+        .unwrap();
+        crate::game::triggers::process_triggers(&mut state, &events);
+        assert_eq!(state.stack.len(), 1);
+
+        let mut resolution_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolution_events);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut resolution_events,
+        )
+        .unwrap();
+
+        let victim = state.objects.get(&victim_id).unwrap();
+        assert_eq!(victim.zone, Zone::Battlefield);
+        assert_eq!(victim.controller, PlayerId(0));
+        assert!(!state.players[1].graveyard.contains(&victim_id));
+    }
+
+    #[test]
+    fn tergrid_style_trigger_reanimates_permanent_selected_for_sacrifice_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tergrid".to_string(),
+            Zone::Battlefield,
+        );
+        let victim_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Chosen Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&victim_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = crate::types::ability::TriggerDefinition::new(
+            crate::types::triggers::TriggerMode::Sacrificed,
+        )
+        .optional();
+        trigger.valid_card = Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Permanent],
+            controller: Some(ControllerRef::Opponent),
+            properties: vec![FilterProp::NonToken],
+        }));
+        trigger.execute = Some(Box::new(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::TriggeringSource,
+                    owner_library: false,
+                    enter_transformed: false,
+                    under_your_control: true,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            )
+            .optional(),
+        ));
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(1),
+            cards: vec![victim_id],
+            count: 1,
+            min_count: 0,
+            up_to: false,
+            source_id: ObjectId(99),
+            effect_kind: EffectKind::Sacrifice,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enters_attacking: false,
+            owner_library: false,
+        };
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(1),
+            crate::types::actions::GameAction::SelectCards {
+                cards: vec![victim_id],
+            },
+        )
+        .unwrap();
+        assert_eq!(state.stack.len(), 1);
+        assert!(state.players[1].graveyard.contains(&victim_id));
+
+        let mut resolution_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolution_events);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        let accept_result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            crate::types::actions::GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        let victim = state.objects.get(&victim_id).unwrap();
+        assert_eq!(victim.zone, Zone::Battlefield);
+        assert_eq!(victim.controller, PlayerId(0));
+        assert!(!state.players[1].graveyard.contains(&victim_id));
+
+        let event_record = accept_result
+            .events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    record,
+                    ..
+                } if *object_id == victim_id => Some(record),
+                _ => None,
+            })
+            .expect("Tergrid return should emit a battlefield-entry ZoneChanged event");
+        assert_eq!(event_record.controller, PlayerId(0));
+        assert_eq!(
+            state
+                .zone_changes_this_turn
+                .iter()
+                .rev()
+                .find(|record| {
+                    record.object_id == victim_id && record.to_zone == Zone::Battlefield
+                })
+                .map(|record| record.controller),
+            Some(PlayerId(0))
+        );
+        assert_eq!(
+            state
+                .battlefield_entries_this_turn
+                .iter()
+                .rev()
+                .find(|record| record.object_id == victim_id)
+                .map(|record| record.controller),
+            Some(PlayerId(0))
+        );
+    }
+
+    #[test]
     fn saved_accept_for_may_trigger_resolves_without_prompt() {
         let mut state = GameState::new_two_player(42);
         let source_id = ObjectId(100);

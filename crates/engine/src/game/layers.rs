@@ -618,8 +618,9 @@ pub fn evaluate_layers(state: &mut GameState) {
             obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
             obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
             obj.color = obj.base_color.clone();
-            // CR 613.1b: Reset controller to owner; Layer 2 re-applies control-changing effects.
-            obj.controller = obj.owner;
+            // CR 613.1b: Reset controller to the object's base controller;
+            // Layer 2 re-applies continuous control-changing effects.
+            obj.controller = obj.base_controller.unwrap_or(obj.owner);
             // CR 613.11 + CR 510.1a: Reset combat-assignment rule flags;
             // re-applied after object-characteristic layers are complete.
             obj.assigns_damage_from_toughness = false;

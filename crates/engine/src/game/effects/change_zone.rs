@@ -73,9 +73,12 @@ pub(crate) fn deliver_replaced_zone_change(
         // "under your control" — set before triggers fire.
         if let Some(new_controller) = ctrl_override {
             if to == Zone::Battlefield {
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    obj.controller = new_controller;
-                }
+                zones::apply_battlefield_entry_controller_override(
+                    state,
+                    events,
+                    object_id,
+                    new_controller,
+                );
             }
         }
         // CR 614.1c: Apply counters from replacement pipeline (e.g., saga lore counters,

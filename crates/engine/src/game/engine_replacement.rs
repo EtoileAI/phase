@@ -52,9 +52,14 @@ pub(super) fn handle_replacement_choice(
                             if enter_tapped.resolve(false) {
                                 obj.tapped = true;
                             }
-                            if let Some(new_controller) = controller_override {
-                                obj.controller = new_controller;
-                            }
+                        }
+                        if let Some(new_controller) = controller_override {
+                            zones::apply_battlefield_entry_controller_override(
+                                state,
+                                events,
+                                object_id,
+                                new_controller,
+                            );
                         }
                         // CR 614.1c: Apply counters from replacement pipeline.
                         apply_etb_counters(state, object_id, &enter_with_counters, events);
