@@ -2554,6 +2554,26 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
                 let after = a2.find([',', '.', ' ']).map_or(a2, |i| &a2[i..]);
                 (QuantityRef::EventContextSourceManaValue, after)
             }
+        } else if let Some((rest, qty)) =
+            nom_quantity::parse_quantity_ref
+                .parse(a)
+                .ok()
+                .filter(|(rest, _)| {
+                    // CR 119.3 + CR 400.1: Accept the combinator's partial parse
+                    // only when the remainder is empty or a trailing zone clause
+                    // recognized by `parse_zone_suffix` ("from your graveyard",
+                    // "in exile", …). This leaves "the amount of life you lost this
+                    // turn from your graveyard" (Betor, Ancestor's Voice) for the
+                    // caller's `parse_zone_suffix` pass instead of swallowing it and
+                    // failing the whole mana-value suffix — while keeping every
+                    // other partial-match phrase on the punctuation-bounded path.
+                    // The zone clause is detected via the nom `parse_zone_suffix`
+                    // building block, never a `starts_with` string heuristic.
+                    let r = rest.trim_start();
+                    r.is_empty() || parse_zone_suffix(r).is_some()
+                })
+        {
+            (qty, rest)
         } else {
             // CR 119.3: Generic quantity-ref RHS — extract the phrase up to the
             // next sentence-terminating punctuation and delegate to the shared
