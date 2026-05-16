@@ -2200,8 +2200,26 @@ fn resolve_object_mana_value(
                 })
                 .unwrap_or(0)
         }
+        // CR 608.2k + CR 400.7j + CR 701.21a: The "cost-paid object" mana
+        // value reads `cost_paid_object` first — the canonical referent for
+        // this scope (activated/cast costs: Food Chain, Burnt Offering) — then
+        // falls back to `effect_context_object`. When a `Sacrifice` *effect*
+        // (not a cost) appears mid-resolution — Birthing Ritual: "you may
+        // sacrifice a creature. If you do, you may put a creature card with
+        // mana value X or less ..., where X is 1 plus the sacrificed
+        // creature's mana value" — the sacrificed permanent is captured into
+        // `effect_context_object` (the `EffectZoneChoice` handler snapshots the
+        // `PermanentSacrificed` event into the stashed continuation chain).
+        // Both fields name the same CR 608.2k "specific untargeted object"
+        // referent; the `EventContextSource*` arms above include
+        // `effect_context_object` as a fallback for the same CR 608.2k reason.
         ObjectScope::CostPaidObject => ability
-            .and_then(|ability| ability.cost_paid_object.as_ref())
+            .and_then(|ability| {
+                ability
+                    .cost_paid_object
+                    .as_ref()
+                    .or(ability.effect_context_object.as_ref())
+            })
             .map(|snapshot| u32_to_i32_saturating(snapshot.lki.mana_value))
             .unwrap_or(0),
     }
@@ -5941,6 +5959,129 @@ mod tests {
         assert_eq!(
             resolved, 3,
             "Trigger event must take priority over cost-paid-object fallback"
+        );
+    }
+
+    /// CR 608.2k + CR 202.3 + CR 701.21a — Birthing Ritual (issue #420b): the
+    /// resolution-effect `Sacrifice` ("you may sacrifice a creature. If you do,
+    /// ... put a creature card with mana value X or less ..., where X is 1 plus
+    /// the sacrificed creature's mana value") records the sacrificed permanent
+    /// into `effect_context_object`, not `cost_paid_object` (which is only set
+    /// for activation/cast *costs*). The parser emits
+    /// `Offset { Ref(ObjectManaValue { CostPaidObject }), +1 }` for the X bound;
+    /// the `CostPaidObject` mana-value resolver must fall back to
+    /// `effect_context_object` so the bound resolves to (sac MV + 1) rather
+    /// than 0. Sacrificed MV 3 → bound 4.
+    #[test]
+    fn resolve_object_mana_value_cost_paid_falls_back_to_effect_context_object() {
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::game_state::LKISnapshot;
+
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        // The sacrificed creature (MV 3) is recorded as the effect-context
+        // object — no cost-paid object exists for a resolution-effect sacrifice.
+        ability.set_effect_context_object_recursive(CostPaidObjectSnapshot {
+            object_id: ObjectId(50),
+            lki: LKISnapshot {
+                name: "Sacrificed Creature".to_string(),
+                power: Some(2),
+                toughness: Some(2),
+                mana_value: 3,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                counters: HashMap::new(),
+            },
+        });
+        assert!(
+            ability.cost_paid_object.is_none(),
+            "precondition: no cost-paid object for a resolution-effect sacrifice"
+        );
+
+        // The exact AST the concurrent parser agent emits for "X is 1 plus the
+        // sacrificed creature's mana value".
+        let bound = QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+            offset: 1,
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &bound, &ability),
+            4,
+            "CostPaidObject mana value must fall back to effect_context_object \
+             (MV 3) so the X bound resolves to 1 + 3 = 4"
+        );
+    }
+
+    /// CR 608.2k — precedence: when both `cost_paid_object` and
+    /// `effect_context_object` are present, `cost_paid_object` (the canonical
+    /// referent for `ObjectScope::CostPaidObject`) wins.
+    #[test]
+    fn resolve_object_mana_value_cost_paid_object_takes_priority_over_effect_context() {
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::game_state::LKISnapshot;
+
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let snapshot = |name: &str, mana_value: u32| CostPaidObjectSnapshot {
+            object_id: ObjectId(50),
+            lki: LKISnapshot {
+                name: name.to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                mana_value,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                counters: HashMap::new(),
+            },
+        };
+        // Both fields set, with DIFFERENT mana values so the winning path is
+        // observable.
+        ability.set_effect_context_object_recursive(snapshot("Effect Context", 9));
+        ability.set_cost_paid_object_recursive(snapshot("Cost Paid", 3));
+
+        let bound = QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+            offset: 1,
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &bound, &ability),
+            4,
+            "cost_paid_object (MV 3) must win over effect_context_object (MV 9): \
+             1 + 3 = 4"
         );
     }
 
