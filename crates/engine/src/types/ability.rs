@@ -7559,7 +7559,8 @@ pub enum AbilityCondition {
         )]
         min_count: u32,
     },
-    /// CR 608.2e: "Instead" clause — replaces the parent effect when the additional cost was paid.
+    /// CR 614.1a / CR 614.15: "Instead" clause — a self-replacement effect that replaces
+    /// the parent effect when the additional cost was paid.
     /// The resolver swaps the override sub's effect in place of the parent before resolution.
     AdditionalCostPaidInstead,
     /// CR 608.2c: "If you do" — sub_ability executes only if the parent optional effect was performed.
@@ -7702,8 +7703,9 @@ pub enum AbilityCondition {
     /// CR 611.2b: "if this [permanent] is tapped" — checks the source's tapped status.
     /// For the untapped sense, wrap with `AbilityCondition::Not`.
     SourceIsTapped,
-    /// CR 608.2c: General "instead" replacement — wraps any `AbilityCondition` with
-    /// replacement semantics. When the inner condition is met at resolution, the sub's
+    /// CR 614.1a / CR 614.15: General "instead" self-replacement — wraps any
+    /// `AbilityCondition` with replacement semantics. When the inner condition is
+    /// met at resolution, the sub's
     /// effect chain replaces the parent's entire effect chain. When not met, the base
     /// continuation chain (stored in `else_ability`) runs after the parent's own effect.
     ///

@@ -504,16 +504,43 @@ fn parse_static_line_with_graveyard_keyword_continuation(line: &str) -> Vec<Stat
 
 use crate::parser::oracle_ir::ast::ActivatedConstraintAst;
 
-/// CR 608.2c: Pre-strip "instead if [condition]" or trailing "instead" from effect text.
-/// The "instead" keyword signals a cross-line replacement pattern. The trailing
-/// "if [condition]" (when present after "instead") is parsed through the shared
-/// condition grammar and composed with any ability-word condition at the caller.
-fn strip_instead_suffix(
+/// CR 614.1a / CR 614.15: Pre-strip an "instead" replacement clause from effect text.
+/// The "instead" keyword signals a cross-line self-replacement pattern (CR 614.15 —
+/// "the text can be a separate ability, particularly when preceded by an ability
+/// word").
+///
+/// Three word orders are recognised:
+/// 1. "if [condition], instead [effect]" — condition FIRST (Arrow Storm, Lightning Surge)
+/// 2. "[effect] instead if [condition]" — mid-line "instead", condition AFTER
+/// 3. "[effect] instead" — trailing "instead"
+///
+/// Any extracted "if [condition]" clause is parsed through the shared condition
+/// grammar (`parse_inner_condition`) and composed with any ability-word condition
+/// at the caller.
+fn strip_instead_clause(
     text: &str,
     ctx: &mut ParseContext,
 ) -> (String, Option<AbilityCondition>, bool) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
+
+    // Pattern: "if [condition], instead [effect]" — leading-conditional word order.
+    // Ordered FIRST: more specific (requires a leading "if " before a ", instead "
+    // split). The `", instead "` needle (with surrounding spaces) cannot match the
+    // "instead of" compound, so no extra compound guard is needed here.
+    if let Some((before, after)) = tp.split_around(", instead ") {
+        if let Ok((cond_text, ())) =
+            value::<_, _, OracleError<'_>, _>((), tag("if ")).parse(before.lower.trim_start())
+        {
+            if let Some(condition) = parse_inner_condition(cond_text.trim())
+                .ok()
+                .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
+                .and_then(|condition| ability_word_to_ability_condition(&Some(condition), ctx))
+            {
+                return (after.original.trim().to_string(), Some(condition), true);
+            }
+        }
+    }
 
     // Pattern: " instead if [condition]" — mid-line "instead" followed by condition
     if let Some((before, after)) = tp.rsplit_around(" instead if ") {
@@ -2140,7 +2167,23 @@ pub(crate) fn parse_oracle_ir(
         // not a standing replacement definition. Let the effect-chain parser
         // preserve any preceding clauses ("You gain 1 life for each ...")
         // before the replacement classifier sees the prevention marker.
-        if is_spell && scan_contains(&lower, "prevent") && scan_contains(&lower, "damage") {
+        //
+        // CR 614.15: Exclude ability-word self-replacement lines whose body is
+        // "if <cond>, instead <effect> ... the damage can't be prevented."
+        // (Arrow Storm, Lightning Surge). For these, the prevention clause is a
+        // sub-effect of the conditional override, not the line's primary effect —
+        // routing the whole line through `parse_effect_chain_with_context` here
+        // would swallow the leading conditional and drop the `instead` composition.
+        // They must reach Priority 9, where `strip_instead_clause` extracts the
+        // condition and the existing block composes a `ConditionInstead` sub-ability.
+        let prevention_effect_text = strip_ability_word_with_name(&line)
+            .map(|(_, effect)| effect)
+            .unwrap_or_else(|| line.clone());
+        if is_spell
+            && scan_contains(&lower, "prevent")
+            && scan_contains(&lower, "damage")
+            && !is_instead_replacement_line(&prevention_effect_text)
+        {
             ctx.subject = None;
             ctx.actor = None;
             let def = parse_effect_chain_with_context(&line, AbilityKind::Spell, &mut ctx);
@@ -2408,7 +2451,7 @@ pub(crate) fn parse_oracle_ir(
             // mid-position MV conditions (e.g., "if it has mana value 4 or less")
             // that precede "instead if [ability word condition]".
             let (effect_line_clean, instead_condition, is_instead) =
-                strip_instead_suffix(&effect_line, &mut ctx);
+                strip_instead_clause(&effect_line, &mut ctx);
             let parse_line = if is_instead {
                 effect_line_clean.as_str()
             } else {
@@ -10622,6 +10665,113 @@ mod tests {
             }
             other => panic!("expected ConditionInstead quantity check, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn leading_conditional_instead_composes_self_replacement() {
+        use crate::types::ability::{AbilityCondition, QuantityRef};
+
+        // CR 614.15: "<ability word> — If <condition>, instead <effect>" — the
+        // leading-conditional word order (condition FIRST, then "instead").
+        // Arrow Storm: raid-gated self-replacement. The base 4-damage ability
+        // becomes the fallback; the alternative 5-damage chain is gated by a
+        // `ConditionInstead { AttackedThisTurn >= 1 }`.
+        let r = parse_oracle_text(
+            "Arrow Storm deals 4 damage to any target.\nRaid \u{2014} If you attacked this turn, instead Arrow Storm deals 5 damage to that permanent or player and the damage can't be prevented.",
+            "Arrow Storm",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        // The leading-conditional "instead" line must NOT leave a swallowed-clause
+        // warning — the condition and the alternative effect are both captured.
+        assert!(
+            r.parse_warnings.iter().all(|w| {
+                let kind = w.to_string();
+                // allow-noncombinator: test assertion on a diagnostic-warning kind string, not Oracle-text parsing dispatch
+                !kind.contains("Condition_If") && !kind.contains("Replacement_Instead")
+            }),
+            "leading-conditional instead should not emit swallowed-clause warnings, got: {:?}",
+            r.parse_warnings
+        );
+        assert_eq!(r.abilities.len(), 1, "should compose into ONE base ability");
+        let base = &r.abilities[0];
+        assert!(
+            matches!(
+                *base.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                    ..
+                }
+            ),
+            "base should deal 4, got: {:?}",
+            base.effect
+        );
+        let sub = base
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional self-replacement sub-ability");
+        let Some(AbilityCondition::ConditionInstead { inner }) = sub.condition.as_ref() else {
+            panic!("expected ConditionInstead on sub, got: {:?}", sub.condition);
+        };
+        assert!(
+            matches!(
+                inner.as_ref(),
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::AttackedThisTurn,
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                }
+            ),
+            "expected AttackedThisTurn >= 1 inside ConditionInstead, got: {inner:?}"
+        );
+    }
+
+    #[test]
+    fn leading_conditional_instead_threshold_graveyard_count() {
+        use crate::types::ability::{AbilityCondition, QuantityRef};
+
+        // CR 614.15: Lightning Surge — threshold-gated self-replacement using the
+        // leading-conditional word order with a graveyard-count condition.
+        let r = parse_oracle_text(
+            "Lightning Surge deals 4 damage to any target.\nThreshold \u{2014} If there are seven or more cards in your graveyard, instead Lightning Surge deals 6 damage to that permanent or player and the damage can't be prevented.",
+            "Lightning Surge",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert!(
+            r.parse_warnings.iter().all(|w| {
+                let kind = w.to_string();
+                // allow-noncombinator: test assertion on a diagnostic-warning kind string, not Oracle-text parsing dispatch
+                !kind.contains("Condition_If") && !kind.contains("Replacement_Instead")
+            }),
+            "threshold instead should not emit swallowed-clause warnings, got: {:?}",
+            r.parse_warnings
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let sub = r.abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("expected threshold self-replacement sub-ability");
+        let Some(AbilityCondition::ConditionInstead { inner }) = sub.condition.as_ref() else {
+            panic!("expected ConditionInstead on sub, got: {:?}", sub.condition);
+        };
+        assert!(
+            matches!(
+                inner.as_ref(),
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::GraveyardSize { .. },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 7 },
+                }
+            ),
+            "expected GraveyardSize >= 7 inside ConditionInstead, got: {inner:?}"
+        );
     }
 
     #[test]

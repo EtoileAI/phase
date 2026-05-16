@@ -1399,7 +1399,7 @@ pub(super) fn try_parse_generic_instead_clause(
     // CR 614.1a + CR 608.2c: Inverted form — "[body] instead if <cond>." (e.g.
     // Scepter of Empires). Same semantic as the forward form but with the
     // condition trailing the override body. The chunk-level mid-text
-    // `" instead if "` boundary mirrors the line-level `strip_instead_suffix`
+    // `" instead if "` boundary mirrors the line-level `strip_instead_clause`
     // in `oracle.rs` but operates on a single chunk inside the chain loop.
     if let Some((cond_text, effect_text)) = split_inverted_instead_clause(text) {
         return build_instead_def(cond_text, effect_text, kind, ctx);
