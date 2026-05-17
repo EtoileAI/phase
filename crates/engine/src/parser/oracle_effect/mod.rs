@@ -28072,10 +28072,12 @@ mod tests {
         );
     }
 
-    /// CR 109.5: "That player reveals cards from the top of their library until
+    /// CR 608.2c: "That player reveals cards from the top of their library until
     /// they reveal a creature card." (Curse of Unbinding, Mind Funeral form).
-    /// Subject "that player" extracts to TargetFilter::Player; the player
-    /// parameter is preserved through to the resolver.
+    /// The bare non-trigger "that player" subject extracts to
+    /// `TargetFilter::ParentTargetController` — the anaphor to the controller of
+    /// the player/object target referenced earlier in the same instruction; the
+    /// player parameter is preserved through to the resolver.
     #[test]
     fn reveal_until_that_player_third_person() {
         let def = parse_effect_chain(
@@ -28086,11 +28088,11 @@ mod tests {
             matches!(
                 &*def.effect,
                 Effect::RevealUntil {
-                    player: TargetFilter::Player,
+                    player: TargetFilter::ParentTargetController,
                     ..
                 }
             ),
-            "expected RevealUntil player=Player, got: {:?}",
+            "expected RevealUntil player=ParentTargetController, got: {:?}",
             def.effect
         );
     }

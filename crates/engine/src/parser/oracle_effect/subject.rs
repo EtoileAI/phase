@@ -2695,11 +2695,14 @@ mod tests {
 
     #[test]
     fn parse_subject_the_player() {
+        // CR 608.2c: a bare non-trigger "the player" subject is the same anaphor
+        // class as "that player" — it resolves to the controller of the target
+        // referenced earlier in the same instruction.
         let mut ctx = ParseContext::default();
         let result = parse_subject_application("the player", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
-        assert_eq!(app.affected, TargetFilter::Player);
+        assert_eq!(app.affected, TargetFilter::ParentTargetController);
     }
 
     // CR 608.2c + CR 117.3a: "its/their controller [may]" anaphoric player subject.
