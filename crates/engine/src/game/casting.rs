@@ -150,7 +150,7 @@ struct PreparedSpellCast {
     origin_zone: Zone,
 }
 
-fn combined_spell_ability_def(
+pub(crate) fn combined_spell_ability_def(
     obj: &crate::game::game_object::GameObject,
 ) -> Option<AbilityDefinition> {
     let mut spell_abilities = obj
@@ -4326,6 +4326,21 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
         return false;
     };
 
+    // CR 601.3d: A cast authorized only by a target-dependent flash option is
+    // illegal unless a condition-satisfying target exists. Pre-target FEASIBILITY
+    // analogue of the finalize-time target_dependent_flash_permission_satisfied
+    // SATISFACTION gate. Also covers the Adventure recursion re-entry, since
+    // every CastSpell path flows through can_cast_object_now.
+    if prepared.cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
+        && !restrictions::target_dependent_flash_permission_feasible(
+            state,
+            player,
+            prepared.object_id,
+        )
+    {
+        return false;
+    }
+
     // CR 702.138: Escape requires enough other graveyard cards to exile.
     if prepared.casting_variant == CastingVariant::Escape
         && !graveyard_has_enough_for_escape(state, player, prepared.object_id)
@@ -7404,6 +7419,152 @@ mod tests {
             !castable,
             "later spell abilities with unresolved targets must still gate castability"
         );
+    }
+
+    /// CR 601.3d + CR 702.8a: A spell whose only instant-speed permission is a
+    /// target-dependent flash option must not be offered as a `CastSpell`
+    /// candidate (AI or human) outside the sorcery-speed window unless a
+    /// condition-satisfying target exists. Drives the full
+    /// `can_cast_object_now` → `ai_support::legal_actions` pipeline.
+    #[test]
+    fn can_cast_object_now_rejects_target_dependent_flash_with_no_condition_target() {
+        use crate::types::ability::{ParsedCondition, SpellCastingOption};
+
+        // Build a Timely-Ward-style conditional-flash Enchantment in caster's
+        // hand, with one Spell-kind ability that targets a creature and a flash
+        // option gated on `SpellTargetsFilter { IsCommander }`. No printed Flash.
+        let build_spell = |state: &mut GameState| -> ObjectId {
+            let spell_id = create_object(
+                state,
+                CardId(50),
+                PlayerId(0),
+                "Timely Ward".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.casting_options
+                .push(SpellCastingOption::as_though_had_flash().condition(
+                    ParsedCondition::SpellTargetsFilter {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            properties: vec![FilterProp::IsCommander],
+                            ..Default::default()
+                        }),
+                    },
+                ));
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            ));
+            spell_id
+        };
+
+        // Non-sorcery-speed window: PostCombatMain with a non-empty stack so the
+        // conditional flash option is the only instant-speed permission. Caster
+        // (PlayerId(0)) holds priority.
+        let non_sorcery_window = || -> GameState {
+            let mut state = GameState::new_two_player(42);
+            state.turn_number = 2;
+            state.phase = Phase::PostCombatMain;
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            // Dummy spell on the stack ⇒ not a sorcery-speed window.
+            let stack_id = create_object(
+                &mut state,
+                CardId(99),
+                PlayerId(1),
+                "Stack Filler".to_string(),
+                Zone::Stack,
+            );
+            state.stack.push_back(crate::types::game_state::StackEntry {
+                id: stack_id,
+                source_id: stack_id,
+                controller: PlayerId(1),
+                kind: crate::types::game_state::StackEntryKind::Spell {
+                    card_id: CardId(99),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            state
+        };
+
+        let add_creature = |state: &mut GameState, card: u64, commander: bool| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(1),
+                "Creature".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_commander = commander;
+        };
+
+        // Negative: only a non-commander creature ⇒ infeasible.
+        {
+            let mut state = non_sorcery_window();
+            let spell_id = build_spell(&mut state);
+            add_creature(&mut state, 60, false);
+            assert!(
+                !can_cast_object_now(&state, PlayerId(0), spell_id),
+                "conditional-flash spell with no commander target must be uncastable"
+            );
+            let actions = crate::ai_support::legal_actions(&state);
+            assert!(
+                !actions.iter().any(|a| matches!(
+                    a,
+                    GameAction::CastSpell { object_id, .. } if *object_id == spell_id
+                )),
+                "no CastSpell candidate should be generated for the infeasible flash spell"
+            );
+        }
+
+        // Positive: add a commander creature ⇒ feasible, candidate produced.
+        {
+            let mut state = non_sorcery_window();
+            let spell_id = build_spell(&mut state);
+            add_creature(&mut state, 60, false);
+            add_creature(&mut state, 61, true);
+            assert!(
+                can_cast_object_now(&state, PlayerId(0), spell_id),
+                "conditional-flash spell with a commander target must be castable"
+            );
+            let actions = crate::ai_support::legal_actions(&state);
+            assert!(
+                actions.iter().any(|a| matches!(
+                    a,
+                    GameAction::CastSpell { object_id, .. } if *object_id == spell_id
+                )),
+                "a CastSpell candidate should be generated when a commander target exists"
+            );
+        }
+
+        // Real-Flash bypass: printed Flash, only a non-commander target ⇒
+        // castable regardless (CR 702.8a).
+        {
+            let mut state = non_sorcery_window();
+            let spell_id = build_spell(&mut state);
+            state
+                .objects
+                .get_mut(&spell_id)
+                .unwrap()
+                .keywords
+                .push(Keyword::Flash);
+            add_creature(&mut state, 60, false);
+            assert!(
+                can_cast_object_now(&state, PlayerId(0), spell_id),
+                "printed Flash must bypass the conditional-flash feasibility gate"
+            );
+        }
     }
 
     /// CR 702.61a: `can_cast_object_now` returns false while split second is active.
