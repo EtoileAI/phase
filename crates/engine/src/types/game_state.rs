@@ -1869,11 +1869,11 @@ pub enum WaitingFor {
         /// The pending cast to resume after the return is complete.
         pending_cast: Box<PendingCast>,
     },
-    /// Blight N — player must choose creature(s) to put -1/-1 counters on as cost.
+    /// Blight N — player must choose one creature to put N -1/-1 counters on as cost.
     BlightChoice {
         player: PlayerId,
-        /// How many creatures to blight.
-        count: usize,
+        /// CR 701.68a: N — the number of -1/-1 counters to place on the one chosen creature.
+        counters: u32,
         /// Pre-filtered eligible creatures on the battlefield.
         creatures: Vec<ObjectId>,
         /// The pending cast to resume after blight is complete.
@@ -4603,7 +4603,7 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::BlightChoice {
             player: PlayerId(0),
-            count: 1,
+            counters: 1,
             creatures: vec![ObjectId(1)],
             pending_cast: dummy_pending(),
         }));

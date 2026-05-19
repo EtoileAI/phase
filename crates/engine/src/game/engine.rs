@@ -1631,16 +1631,16 @@ fn apply_action(
         (
             WaitingFor::BlightChoice {
                 player,
-                count,
+                counters,
                 creatures,
                 pending_cast,
             },
             GameAction::SelectCards { cards: chosen },
-        ) => engine_casting::handle_blight_choice(
+        ) => casting_costs::handle_blight_choice(
             state,
             *player,
             *pending_cast.clone(),
-            *count,
+            *counters,
             creatures,
             &chosen,
             &mut events,

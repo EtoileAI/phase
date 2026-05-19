@@ -145,7 +145,7 @@ mod tests {
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::BlightChoice {
                 player: PlayerId(0),
-                count: 1,
+                counters: 1,
                 creatures: vec![small, big],
                 pending_cast: dummy_pending(),
             },

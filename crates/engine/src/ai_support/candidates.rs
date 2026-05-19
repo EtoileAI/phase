@@ -1213,17 +1213,14 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
-        // Blight: AI selects creatures to put -1/-1 counters on as cost
+        // CR 701.68a: AI selects exactly one creature to put N -1/-1 counters on as cost.
         WaitingFor::BlightChoice {
-            player,
-            count,
-            creatures,
-            ..
-        } => combinations(creatures, *count)
-            .into_iter()
-            .map(|combo| {
+            player, creatures, ..
+        } => creatures
+            .iter()
+            .map(|id| {
                 candidate(
-                    GameAction::SelectCards { cards: combo },
+                    GameAction::SelectCards { cards: vec![*id] },
                     TacticalClass::Selection,
                     Some(*player),
                 )

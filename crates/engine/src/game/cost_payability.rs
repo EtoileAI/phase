@@ -276,21 +276,14 @@ impl AbilityCost {
             // or has already been exerted; the cost itself is always payable.
             // CR 701.43c (off-battlefield) is enforced at payment time.
             AbilityCost::Exert => true,
-            // CR 601.2b: Blight requires N creatures controlled by the player.
-            AbilityCost::Blight { count } => {
-                state
-                    .battlefield
-                    .iter()
-                    .copied()
-                    .filter(|&id| {
-                        state.objects.get(&id).is_some_and(|o| {
-                            o.controller == player
-                                && o.card_types.core_types.contains(&CoreType::Creature)
-                        })
-                    })
-                    .count()
-                    >= *count as usize
-            }
+            // CR 701.68b: Blight is payable iff the player controls >=1 creature.
+            // N (the number of -1/-1 counters) is irrelevant to eligibility — the
+            // counters all go on the one chosen creature.
+            AbilityCost::Blight { .. } => state.battlefield.iter().copied().any(|id| {
+                state.objects.get(&id).is_some_and(|o| {
+                    o.controller == player && o.card_types.core_types.contains(&CoreType::Creature)
+                })
+            }),
             // CR 601.2b: Reveal N matching cards requires them to exist in hand.
             // Filter-less reveal (self-reveal) is always payable — you can always
             // reveal the source spell you're casting.
@@ -501,7 +494,10 @@ mod tests {
 
         let _id = scenario.add_creature(P0, "Bear", 2, 2).id();
         assert!(AbilityCost::Blight { count: 1 }.is_payable(&scenario.state, P0, ObjectId(0)));
-        assert!(!AbilityCost::Blight { count: 2 }.is_payable(&scenario.state, P0, ObjectId(0)));
+        // CR 701.68b: N > 1 no longer requires N creatures — all N counters go on
+        // the single chosen creature, so one controlled creature suffices.
+        assert!(AbilityCost::Blight { count: 2 }.is_payable(&scenario.state, P0, ObjectId(0)));
+        assert!(AbilityCost::Blight { count: 3 }.is_payable(&scenario.state, P0, ObjectId(0)));
     }
 
     #[test]

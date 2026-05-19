@@ -17,6 +17,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::casting::emit_targeting_events;
+use super::effects::counters::add_counter_with_replacement;
 use super::engine::EngineError;
 use super::mana_abilities;
 use super::mana_payment;
@@ -640,20 +641,20 @@ pub(crate) fn handle_return_to_hand_for_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
-/// Blight cost — put -1/-1 counters on chosen creatures after player selection.
+/// Blight cost — CR 701.68a: put N -1/-1 counters on the one chosen creature.
 pub(crate) fn handle_blight_choice(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
-    count: usize,
+    mut pending: PendingCast,
+    counters: u32,
     legal_creatures: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if chosen.len() != count {
+    // CR 701.68a: to blight is to put N -1/-1 counters on a creature (one) you control.
+    if chosen.len() != 1 {
         return Err(EngineError::InvalidAction(format!(
-            "Must blight exactly {} creature(s), got {}",
-            count,
+            "Must blight exactly one creature, got {}",
             chosen.len()
         )));
     }
@@ -665,13 +666,37 @@ pub(crate) fn handle_blight_choice(
         }
     }
 
-    // Put a -1/-1 counter on each chosen creature
-    for &id in chosen {
-        if let Some(obj) = state.objects.get_mut(&id) {
-            *obj.counters
-                .entry(crate::types::counter::CounterType::Minus1Minus1)
-                .or_insert(0) += 1;
-        }
+    // CR 701.68a + CR 614.1: place N -1/-1 counters on the one chosen
+    // creature, routed through the CR 122.6 replacement pipeline. Guarded
+    // on N > 0 for exact parity with the #497 effect-form handler
+    // (engine_resolution_choices.rs `EffectKind::BlightEffect`); the parser
+    // does not structurally exclude a degenerate `Blight 0`.
+    if counters > 0 {
+        add_counter_with_replacement(
+            state,
+            player,
+            chosen[0],
+            crate::types::counter::CounterType::Minus1Minus1,
+            counters,
+            events,
+        );
+    }
+
+    // CR 117.1 + CR 608.2k: snapshot the blighted creature as this ability's
+    // cost-paid object so later `CostPaidObject` target filters / quantity
+    // refs ("the creature you blighted") resolve to it. This writes the
+    // `cost_paid_object` field — the cost-paid-object category — exactly as
+    // the sacrifice-for-cost handler does. It is DELIBERATELY a different
+    // field from the #497 EFFECT-form handler, which writes
+    // `effect_context_object` (CR 608.2c). `TargetFilter::CostPaidObject`
+    // (filter.rs) reads only `cost_paid_object`; cost != effect.
+    if let Some(obj) = state.objects.get(&chosen[0]) {
+        pending
+            .ability
+            .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                object_id: chosen[0],
+                lki: obj.snapshot_for_mana_spent(),
+            });
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
@@ -1805,16 +1830,18 @@ fn pay_additional_cost(
                     })
                 })
                 .collect();
-            // CR 601.2b: Defense-in-depth — the upstream gate must have already
-            // caught an empty eligibility set. Never construct a dead WaitingFor.
-            if creatures.len() < count as usize {
+            // CR 701.68b + CR 601.2b: Blight is only choosable while the player
+            // controls >=1 creature (N is irrelevant to eligibility). Defense-in-depth
+            // — the is_payable gate must have already caught an empty eligibility set;
+            // never construct a dead WaitingFor.
+            if creatures.is_empty() {
                 return Err(EngineError::ActionNotAllowed(
-                    "Not enough creatures to blight".to_string(),
+                    "No creature to blight".to_string(),
                 ));
             }
             return Ok(WaitingFor::BlightChoice {
                 player,
-                count: count as usize,
+                counters: count,
                 creatures,
                 pending_cast: Box::new(pending),
             });
@@ -7777,5 +7804,296 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
             runner.state().stack.is_empty(),
             "an aborted cast must not leave the spell on the stack"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #510 — blight COST form: N -1/-1 counters on ONE chosen creature.
+    // CR 701.68a-c. Tests drive the real `apply` casting pipeline.
+    // ---------------------------------------------------------------------
+
+    /// Build a sorcery in P0's hand carrying a `Required(Blight N)` additional
+    /// cost. The spell has a parsed Scry ability so the resolved ability (and
+    /// its `cost_paid_object` snapshot) is observable on the stack entry.
+    fn blight_cost_scenario(
+        blight_n: u32,
+        controlled_creatures: usize,
+    ) -> (
+        crate::game::scenario::GameRunner,
+        ObjectId,
+        CardId,
+        Vec<ObjectId>,
+    ) {
+        use crate::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        let creatures: Vec<ObjectId> = (0..controlled_creatures)
+            .map(|i| {
+                scenario
+                    .add_creature(PlayerId(0), &format!("Bear {i}"), 3, 3)
+                    .id()
+            })
+            .collect();
+
+        let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Blight Sorcery", false);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        });
+        builder.from_oracle_text("Scry 1.");
+        builder.with_additional_cost(AdditionalCost::Required(AbilityCost::Blight {
+            count: blight_n,
+        }));
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+
+        let runner = scenario.build();
+        (runner, spell_id, card_id, creatures)
+    }
+
+    /// Read the `Minus1Minus1` counter total on a battlefield object.
+    fn minus_counters(state: &GameState, id: ObjectId) -> u32 {
+        state
+            .objects
+            .get(&id)
+            .and_then(|o| {
+                o.counters
+                    .get(&crate::types::counter::CounterType::Minus1Minus1)
+            })
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The resolved ability's `cost_paid_object` snapshot, read off the spell's
+    /// stack entry after the blight cost has been paid.
+    fn stack_cost_paid_object(
+        state: &GameState,
+        spell_id: ObjectId,
+    ) -> Option<crate::types::ability::CostPaidObjectSnapshot> {
+        state
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == spell_id)
+            .find_map(|entry| entry.ability().and_then(|a| a.cost_paid_object.clone()))
+    }
+
+    /// Test A — CR 701.68a: blighting N places N -1/-1 counters on the ONE
+    /// chosen creature, not one counter per creature. Reverted fix lands 1.
+    #[test]
+    fn blight_cost_places_n_counters_on_one_creature() {
+        use crate::types::GameAction;
+
+        let (mut runner, spell_id, card_id, creatures) = blight_cost_scenario(2, 1);
+        let target = creatures[0];
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting the Blight 2 sorcery must be accepted");
+
+        match runner.state().waiting_for.clone() {
+            WaitingFor::BlightChoice {
+                counters,
+                creatures,
+                ..
+            } => {
+                assert_eq!(counters, 2, "BlightChoice must carry N=2 counters");
+                assert_eq!(creatures, vec![target], "eligibility pool is the one Bear");
+            }
+            other => panic!("expected BlightChoice, got {other:?}"),
+        }
+
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![target],
+            })
+            .expect("selecting the one creature to blight must be accepted");
+
+        assert_eq!(
+            minus_counters(runner.state(), target),
+            2,
+            "CR 701.68a: Blight 2 must place 2 -1/-1 counters on the chosen creature"
+        );
+    }
+
+    /// Test B — CR 701.68b: blight is payable while the player controls >=1
+    /// creature, even when N exceeds the controlled-creature count. Reverted
+    /// fix demands N creatures and returns false.
+    #[test]
+    fn blight_payable_with_n_greater_than_creature_count() {
+        use crate::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        let bear = scenario.add_creature(PlayerId(0), "Lone Bear", 2, 2).id();
+
+        assert!(
+            AbilityCost::Blight { count: 3 }.is_payable(&scenario.state, PlayerId(0), bear),
+            "CR 701.68b: Blight 3 is payable with a single controlled creature"
+        );
+    }
+
+    /// Test C — CR 701.68b eligibility gate: with zero controlled creatures the
+    /// cast is rejected and no `BlightChoice` is ever constructed.
+    #[test]
+    fn blight_cost_rejected_with_no_creatures() {
+        use crate::types::GameAction;
+
+        let (mut runner, spell_id, card_id, _) = blight_cost_scenario(2, 0);
+
+        let err = runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect_err("casting Blight 2 with no creatures must be rejected");
+
+        assert!(
+            !matches!(runner.state().waiting_for, WaitingFor::BlightChoice { .. }),
+            "no BlightChoice WaitingFor may be constructed when ineligible"
+        );
+        let _ = err; // the cast is rejected before any blight prompt
+    }
+
+    /// Test D — CR 614.1: the counter placement routes through
+    /// `add_counter_with_replacement`. With a counter-doubling replacement
+    /// active, Blight 1 lands 2 counters. Reverted fix mutates counters
+    /// directly and lands only 1.
+    #[test]
+    fn blight_cost_is_replacement_aware() {
+        use crate::types::ability::{QuantityModification, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::GameAction;
+
+        let (mut runner, spell_id, card_id, creatures) = blight_cost_scenario(1, 1);
+        let target = creatures[0];
+
+        // CR 614.1a: counter-doubling replacement effect (Doubling Season-class).
+        let repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Double);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .replacement_definitions = vec![repl].into();
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting the Blight 1 sorcery must be accepted");
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![target],
+            })
+            .expect("selecting the creature to blight must be accepted");
+
+        assert_eq!(
+            minus_counters(runner.state(), target),
+            2,
+            "CR 614.1: Blight 1 under a doubling replacement must land 2 counters"
+        );
+    }
+
+    /// Test E — CR 701.68a: exactly one creature must be chosen. Selecting two
+    /// creatures against the `BlightChoice` is an `InvalidAction`.
+    #[test]
+    fn blight_cost_rejects_multiple_creatures() {
+        use crate::types::GameAction;
+
+        let (mut runner, spell_id, card_id, creatures) = blight_cost_scenario(2, 2);
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting the Blight 2 sorcery must be accepted");
+
+        let err = runner
+            .act(GameAction::SelectCards {
+                cards: vec![creatures[0], creatures[1]],
+            })
+            .expect_err("selecting two creatures to blight must be rejected");
+
+        match err {
+            EngineError::InvalidAction(msg) => assert!(
+                msg.contains("Must blight exactly one creature, got 2"),
+                "unexpected error message: {msg}"
+            ),
+            other => panic!("expected InvalidAction, got {other:?}"),
+        }
+    }
+
+    /// Test F — CR 117.1 / CR 608.2k: the blighted creature is snapshotted as
+    /// the resolving ability's `cost_paid_object`. Reverted fix leaves the
+    /// field `None`.
+    #[test]
+    fn blight_cost_snapshots_cost_paid_object() {
+        use crate::types::GameAction;
+
+        let (mut runner, spell_id, card_id, creatures) = blight_cost_scenario(2, 1);
+        let target = creatures[0];
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting the Blight 2 sorcery must be accepted");
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![target],
+            })
+            .expect("selecting the creature to blight must be accepted");
+
+        let snapshot = stack_cost_paid_object(runner.state(), spell_id)
+            .expect("CR 608.2k: the resolving ability must carry a cost_paid_object snapshot");
+        assert_eq!(
+            snapshot.object_id, target,
+            "the cost-paid object must be the blighted creature"
+        );
+    }
+
+    /// Test G — degenerate `Blight 0` guard (#510 SHOULD-FIX 2): no counter is
+    /// placed (the `if counters > 0` guard suppresses the call) but the
+    /// `cost_paid_object` snapshot is still taken (it is unconditional).
+    #[test]
+    fn blight_zero_places_no_counter_but_still_snapshots() {
+        use crate::types::GameAction;
+
+        let (mut runner, spell_id, card_id, creatures) = blight_cost_scenario(0, 1);
+        let target = creatures[0];
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting the Blight 0 sorcery must be accepted");
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![target],
+            })
+            .expect("selecting the creature to blight must be accepted");
+
+        assert_eq!(
+            minus_counters(runner.state(), target),
+            0,
+            "Blight 0 must place no -1/-1 counter (if counters > 0 guard)"
+        );
+        let snapshot = stack_cost_paid_object(runner.state(), spell_id)
+            .expect("the cost_paid_object snapshot is unconditional, even for Blight 0");
+        assert_eq!(snapshot.object_id, target);
     }
 }
