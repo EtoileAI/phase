@@ -550,10 +550,30 @@ pub(super) fn apply_post_replacement_effect(
         });
     }
 
-    let targets = object_id
-        .map(TargetRef::Object)
-        .into_iter()
-        .collect::<Vec<_>>();
+    // CR 614.1c: The injected `Object(source)` target is the source-as-SelfRef
+    // hook for replacement post-effects that consume their source (BecomeCopy,
+    // PutCounter, Choose). For an interactive chooser-driven `Effect::Sacrifice`
+    // whose `target` is a `Typed(...)` scope filter (e.g., the Devour synthesizer's
+    // "sacrifice any number of your creatures"), the source is NOT the sacrificed
+    // object — the prompt picks from the controller's eligible pool. Suppress the
+    // injection in that case so `sacrifice.rs::resolve` falls through to its
+    // chooser-driven `EffectZoneChoice` branch instead of treating the source as
+    // a pre-selected sacrifice target.
+    let sacrifice_typed_scope = matches!(
+        &*real_work.effect,
+        Effect::Sacrifice {
+            target: TargetFilter::Typed(_) | TargetFilter::Any,
+            ..
+        }
+    );
+    let targets = if sacrifice_typed_scope {
+        Vec::new()
+    } else {
+        object_id
+            .map(TargetRef::Object)
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
     let resolved = build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
     let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
 

@@ -117,6 +117,7 @@ pub enum KeywordKind {
     Kicker,
     Cycling,
     Flashback,
+    Retrace,
     Ward,
     Equip,
     Landwalk,
@@ -909,6 +910,7 @@ impl Keyword {
             Keyword::Kicker(_) => KeywordKind::Kicker,
             Keyword::Cycling(_) => KeywordKind::Cycling,
             Keyword::Flashback(_) => KeywordKind::Flashback,
+            Keyword::Retrace => KeywordKind::Retrace,
             Keyword::Ward(_) => KeywordKind::Ward,
             Keyword::Equip(_) => KeywordKind::Equip,
             Keyword::Landwalk(_) => KeywordKind::Landwalk,
@@ -1022,7 +1024,6 @@ impl Keyword {
             | Keyword::Ravenous
             | Keyword::ReadAhead
             | Keyword::Rebound
-            | Keyword::Retrace
             | Keyword::Ripple
             | Keyword::Saddle(_)
             | Keyword::Scavenge(_)

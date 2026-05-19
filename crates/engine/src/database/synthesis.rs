@@ -2514,6 +2514,181 @@ fn is_bloodthirst_x_etb_replacement(replacement: &ReplacementDefinition) -> bool
     is_bloodthirst_etb_replacement(replacement, &BloodthirstValue::X)
 }
 
+/// CR 702.82a: Devour N is a static ability — "As this object enters, you may
+/// sacrifice any number of creatures. This permanent enters with N +1/+1
+/// counters on it for each creature sacrificed this way."
+///
+/// CR 614.1c: an "as [this permanent] enters" clause is a replacement effect;
+/// CR 614.12a: the optional sacrifice choice is made *before* the permanent
+/// enters the battlefield. Devour is therefore synthesized as a
+/// `ReplacementEvent::Moved` replacement on `SelfRef`, never an activated or
+/// triggered ability.
+///
+/// The synthesized `execute` is a two-step sub-ability chain:
+///   1. `Effect::Sacrifice` with `count: UpTo(ObjectCount(your creatures))`
+///      and `min_count: 0` — the ranged interactive "sacrifice any number"
+///      choice (an empty choice is legal: CR 702.82a "you *may* sacrifice").
+///   2. `.sub_ability` = `Effect::PutCounter` of N +1/+1 counters per creature
+///      sacrificed on `SelfRef` (CR 122.1).
+///
+/// Counter-count linkage: the ranged `EffectZoneChoice` Sacrifice completion
+/// stamps `state.last_effect_count` (the number of creatures chosen).
+/// `QuantityRef::EventContextAmount`'s resolver falls back through
+/// `last_effect_count`, so the `PutCounter` count reads exactly the number
+/// sacrificed. For Devour N > 1 the count is wrapped in
+/// `QuantityExpr::Multiply { factor: n, .. }` (CR 702.82a "N counters per
+/// creature sacrificed"). `PreviousEffectAmount` is NOT used — it reads
+/// `last_effect_amount`, which the ranged Sacrifice never stamps.
+///
+/// CR 702.82c "Devour [quality]" variant: `Keyword::Devour(u32)` carries only
+/// N, not a quality filter. This synthesizer hard-codes the CR 702.82a default
+/// (sacrifice creatures). A future card needing the quality axis requires
+/// parameterizing the keyword to `Devour { n, quality }`.
+///
+/// CR 113.2c: each Devour instance functions independently. Per-N idempotency
+/// (`is_devour_etb_replacement`) emits only the delta so re-running synthesis
+/// is a no-op.
+pub fn synthesize_devour(face: &mut CardFace) {
+    let devour_values: Vec<u32> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Devour(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    if devour_values.is_empty() {
+        return;
+    }
+
+    for &n in &devour_values {
+        let needed = devour_values.iter().filter(|m| **m == n).count();
+        let existing = face
+            .replacements
+            .iter()
+            .filter(|r| is_devour_etb_replacement(r, n))
+            .count();
+        if existing >= needed {
+            continue;
+        }
+
+        // CR 122.1: N +1/+1 counters per creature sacrificed this way. The
+        // per-creature count is `EventContextAmount` (resolves to the number
+        // the ranged Sacrifice choice stamped into `last_effect_count`); for
+        // N > 1 it is scaled by `factor: n`.
+        let counter_count = if n == 1 {
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }
+        } else {
+            QuantityExpr::Multiply {
+                factor: n as i32,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+            }
+        };
+
+        let put_counters = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: counter_count,
+                target: TargetFilter::SelfRef,
+            },
+        );
+
+        // CR 702.82a: "you may sacrifice any number of creatures" — a ranged
+        // `UpTo` choice bounded by the controller's eligible creature pool,
+        // `min_count: 0` so an empty choice is legal.
+        let sacrifice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                count: QuantityExpr::up_to(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::You),
+                        ),
+                    },
+                }),
+                min_count: 0,
+            },
+        )
+        .description(format!(
+            "CR 702.82a: Devour {n} — sacrifice any number of creatures; this \
+             permanent enters with {n} +1/+1 counter{} per creature sacrificed.",
+            if n == 1 { "" } else { "s" }
+        ))
+        .sub_ability(put_counters);
+
+        let replacement = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(sacrifice)),
+            valid_card: Some(TargetFilter::SelfRef),
+            description: Some(format!(
+                "CR 702.82a + CR 614.1c: Devour {n} — as this creature enters, \
+                 you may sacrifice any number of creatures; it enters with {n} \
+                 +1/+1 counter{} for each creature sacrificed this way.",
+                if n == 1 { "" } else { "s" }
+            )),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(replacement);
+    }
+}
+
+/// Idempotency-shape predicate for `synthesize_devour`'s ETB replacement.
+/// True iff `replacement` is a `Moved` replacement on `SelfRef` whose `execute`
+/// chain is `Effect::Sacrifice` of your creatures (ranged `UpTo`) with a
+/// `PutCounter` of `expected_n` P1P1 counters per creature on `SelfRef` as its
+/// sub-ability.
+///
+/// `expected_n` is load-bearing: a card carrying both a printed enters-with-K
+/// replacement and `Keyword::Devour(N≠K)` must not dedupe — the `Multiply`
+/// factor (N) for N > 1 and the bare `EventContextAmount` (N == 1) discriminate
+/// the count.
+fn is_devour_etb_replacement(replacement: &ReplacementDefinition, expected_n: u32) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || !matches!(replacement.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    if !matches!(&*execute.effect, Effect::Sacrifice { .. }) {
+        return false;
+    }
+    let Some(sub) = execute.sub_ability.as_deref() else {
+        return false;
+    };
+    let Effect::PutCounter {
+        counter_type,
+        count,
+        target: TargetFilter::SelfRef,
+    } = &*sub.effect
+    else {
+        return false;
+    };
+    if *counter_type != CounterType::Plus1Plus1 {
+        return false;
+    }
+    let expected_count = if expected_n == 1 {
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        }
+    } else {
+        QuantityExpr::Multiply {
+            factor: expected_n as i32,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }),
+        }
+    };
+    *count == expected_count
+}
+
 /// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
 /// carrying `Keyword::Suspend { count, cost }`:
 ///
@@ -2794,6 +2969,11 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.54a + CR 702.54b + CR 702.54c: Bloodthirst N/X —
     // ETB-with-P1P1 replacement. Each instance functions independently.
     synthesize_bloodthirst(face);
+    // CR 702.82a + CR 614.1c + CR 614.12a: Devour N — as-enters replacement
+    // whose execute chain is a ranged "sacrifice any number of creatures"
+    // choice → PutCounter of N P1P1 counters per creature sacrificed. Each
+    // instance functions independently (CR 113.2c).
+    synthesize_devour(face);
     // CR 702.62a: Suspend — hand-activated alt-cost + upkeep counter-removal +
     // last-counter free-cast. Runs after Evoke to keep alt-cost synthesizers
     // grouped; idempotent so order against Cycling/Madness is irrelevant.
@@ -9046,5 +9226,153 @@ mod bloodthirst_runtime_tests {
             p1p1, 0,
             "after turn rollover the previous turn's damage no longer counts"
         );
+    }
+}
+
+#[cfg(test)]
+mod devour_synthesis_tests {
+    //! CR 702.82a + CR 614.1c: Shape tests for the synthesized Devour
+    //! as-enters replacement. Pinned to the exact wire-up the runtime
+    //! resolver consumes — a `Moved`/`SelfRef` replacement whose `execute`
+    //! chain is `Effect::Sacrifice` (ranged `UpTo` over your creatures) →
+    //! `Effect::PutCounter` of P1P1 counters on `SelfRef`.
+    use super::*;
+
+    fn face_with_devour(n: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Devour(n));
+        face
+    }
+
+    /// CR 702.82a: Devour 1 synthesizes one `Moved`/`SelfRef` replacement
+    /// whose execute chain is `Sacrifice(UpTo) → PutCounter(P1P1, SelfRef)`,
+    /// and whose `PutCounter` count is the bare `EventContextAmount` (one
+    /// counter per creature sacrificed).
+    #[test]
+    fn synthesize_devour_1_builds_sacrifice_then_counter_chain() {
+        let mut face = face_with_devour(1);
+        synthesize_devour(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_devour_etb_replacement(r, 1))
+            .expect("Devour 1 must synthesize an as-enters replacement");
+
+        assert!(matches!(replacement.event, ReplacementEvent::Moved));
+        assert!(matches!(
+            replacement.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
+
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("Devour replacement requires an execute body");
+
+        // Parent effect: ranged "sacrifice up to N of your creatures".
+        let Effect::Sacrifice {
+            target,
+            count,
+            min_count,
+        } = &*execute.effect
+        else {
+            panic!("Devour execute parent must be Effect::Sacrifice");
+        };
+        assert_eq!(
+            *min_count, 0,
+            "CR 702.82a: 'you may sacrifice any number' — an empty choice is legal"
+        );
+        assert!(
+            matches!(count, QuantityExpr::UpTo { .. }),
+            "Devour sacrifice count must be a ranged UpTo choice, got {count:?}"
+        );
+        assert_eq!(
+            *target,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            "Devour sacrifices creatures the controller controls"
+        );
+
+        // Sub-ability: PutCounter of EventContextAmount P1P1 counters on self.
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("Devour execute must chain to a PutCounter sub-ability");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*sub.effect
+        else {
+            panic!("Devour sub-ability must be Effect::PutCounter");
+        };
+        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+        assert!(matches!(target, TargetFilter::SelfRef));
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+            "Devour 1 places exactly one counter per creature sacrificed — \
+             the count must be the bare EventContextAmount (NOT \
+             PreviousEffectAmount, which the ranged Sacrifice never stamps)"
+        );
+    }
+
+    /// CR 702.82a: Devour 2 scales the per-creature counter count by the
+    /// keyword's N via `QuantityExpr::Multiply { factor: 2, .. }`.
+    #[test]
+    fn synthesize_devour_2_scales_counter_count_by_n() {
+        let mut face = face_with_devour(2);
+        synthesize_devour(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_devour_etb_replacement(r, 2))
+            .expect("Devour 2 must synthesize an as-enters replacement");
+        let sub = replacement
+            .execute
+            .as_deref()
+            .and_then(|e| e.sub_ability.as_deref())
+            .expect("Devour 2 execute must chain to a PutCounter sub-ability");
+        let Effect::PutCounter { count, .. } = &*sub.effect else {
+            panic!("Devour 2 sub-ability must be Effect::PutCounter");
+        };
+        assert_eq!(
+            *count,
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                }),
+            },
+            "Devour 2 places 2 counters per creature sacrificed (CR 702.82a)"
+        );
+        // A Devour-2 replacement must not be mistaken for a Devour-1 one.
+        assert!(!is_devour_etb_replacement(replacement, 1));
+    }
+
+    /// CR 113.2c: re-running synthesis is idempotent — exactly one Devour
+    /// replacement survives.
+    #[test]
+    fn synthesize_devour_is_idempotent() {
+        let mut face = face_with_devour(2);
+        synthesize_devour(&mut face);
+        synthesize_devour(&mut face);
+        let count = face
+            .replacements
+            .iter()
+            .filter(|r| is_devour_etb_replacement(r, 2))
+            .count();
+        assert_eq!(count, 1, "running synthesis twice must not duplicate");
+    }
+
+    /// A face with no Devour keyword gets no Devour replacement.
+    #[test]
+    fn synthesize_devour_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_devour(&mut face);
+        assert!(face.replacements.is_empty());
     }
 }
