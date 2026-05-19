@@ -1714,7 +1714,8 @@ fn inject_controller(filter: TargetFilter, controller: ControllerRef) -> TargetF
 fn parse_mana_spent_to_cast_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     if let Ok((rest, _)) = pair(tag::<_, _, OracleError<'_>>("color"), opt(tag("s"))).parse(input) {
         let (rest, _) = tag(" of mana spent to cast ").parse(rest)?;
-        let (rest, _) = parse_mana_spent_self_subject(rest)?;
+        // SelfObject literal retained: this ref form never accepts "that" subjects.
+        let (rest, _scope) = parse_mana_spent_self_subject(rest)?;
         return Ok((
             rest,
             QuantityRef::ManaSpentToCast {
@@ -1735,7 +1736,8 @@ fn parse_mana_spent_to_cast_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     }
 
     let (rest, _) = tag("mana spent to cast ").parse(input)?;
-    let (rest, _) = parse_mana_spent_self_subject(rest)?;
+    // SelfObject literal retained: this ref form never accepts "that" subjects.
+    let (rest, _scope) = parse_mana_spent_self_subject(rest)?;
     Ok((
         rest,
         QuantityRef::ManaSpentToCast {
@@ -1752,7 +1754,8 @@ pub(crate) fn parse_mana_from_source_spent_to_cast(input: &str) -> OracleResult<
     let (rest, _) = tag("mana from ").parse(input)?;
     let (rest, source_filter) = parse_mana_source_filter(rest)?;
     let (rest, _) = alt((tag(" that was spent to cast "), tag(" spent to cast "))).parse(rest)?;
-    let (rest, _) = parse_mana_spent_self_subject(rest)?;
+    // SelfObject literal retained: this ref form never accepts "that" subjects.
+    let (rest, _scope) = parse_mana_spent_self_subject(rest)?;
     Ok((rest, source_filter))
 }
 
@@ -1768,18 +1771,29 @@ pub(crate) fn parse_mana_source_filter(input: &str) -> OracleResult<'_, TargetFi
     Ok((rest, source_filter))
 }
 
-pub(crate) fn parse_mana_spent_self_subject(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
-            tag("it"),
-            tag("this spell"),
-            tag("this creature"),
-            tag("this permanent"),
-            tag("them"),
-            tag("~"),
-        )),
-    )
+/// CR 400.7d: Parse the subject anaphora of a "mana spent to cast <subject>"
+/// clause and report which `CastManaObjectScope` it selects.
+///
+/// The grammatical anaphora *is* the scope signal in MTG templating:
+/// - "it" / "this spell" / "this creature" / "this permanent" / "them" / "~"
+///   → the object the spell/ability *is* → `CastManaObjectScope::SelfObject`
+/// - "that spell" / "that creature"
+///   → an object referenced by a triggering event → `CastManaObjectScope::TriggeringSpell`
+///
+/// A resolving sorcery referring to "this spell" must select `SelfObject` (CR
+/// 400.7d): the resolving spell references its own payment-time mana. A
+/// triggered ability referring to "that spell" selects `TriggeringSpell`.
+pub(crate) fn parse_mana_spent_self_subject(input: &str) -> OracleResult<'_, CastManaObjectScope> {
+    alt((
+        value(CastManaObjectScope::TriggeringSpell, tag("that spell")),
+        value(CastManaObjectScope::TriggeringSpell, tag("that creature")),
+        value(CastManaObjectScope::SelfObject, tag("this spell")),
+        value(CastManaObjectScope::SelfObject, tag("this creature")),
+        value(CastManaObjectScope::SelfObject, tag("this permanent")),
+        value(CastManaObjectScope::SelfObject, tag("it")),
+        value(CastManaObjectScope::SelfObject, tag("them")),
+        value(CastManaObjectScope::SelfObject, tag("~")),
+    ))
     .parse(input)
 }
 
@@ -2422,6 +2436,34 @@ mod tests {
         TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
+
+    /// CR 400.7d: each subject anaphora maps to the correct
+    /// `CastManaObjectScope` — "this …"/"it"/"them"/"~" → `SelfObject`;
+    /// "that …" → `TriggeringSpell`.
+    #[test]
+    fn test_parse_mana_spent_self_subject_scope() {
+        for subj in [
+            "it",
+            "this spell",
+            "this creature",
+            "this permanent",
+            "them",
+            "~",
+        ] {
+            let (rest, scope) = parse_mana_spent_self_subject(subj).unwrap();
+            assert_eq!(rest, "", "subject {subj:?} should fully consume");
+            assert_eq!(scope, CastManaObjectScope::SelfObject, "subject {subj:?}");
+        }
+        for subj in ["that spell", "that creature"] {
+            let (rest, scope) = parse_mana_spent_self_subject(subj).unwrap();
+            assert_eq!(rest, "", "subject {subj:?} should fully consume");
+            assert_eq!(
+                scope,
+                CastManaObjectScope::TriggeringSpell,
+                "subject {subj:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_quantity_fixed() {

@@ -2839,17 +2839,21 @@ fn parse_creature_died_this_turn_conditions(input: &str) -> OracleResult<'_, Sta
 /// CR 106.3 + CR 601.2h + CR 603.4: Parse
 /// "mana from [a/an] <source-filter> [source] was spent to cast <self>" as a
 /// positive quantity check over the source-qualified spent-mana snapshots.
+///
+/// CR 400.7d: the subject anaphora selects the scope — "this spell" on a
+/// resolving sorcery (e.g. Devour Intellect) is `SelfObject`, "that spell" on a
+/// triggered ability is `TriggeringSpell`.
 fn parse_source_qualified_mana_spent_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("mana from ").parse(input)?;
     let (rest, source_filter) = nom_quantity::parse_mana_source_filter(rest)?;
     let (rest, _) = tag(" was spent to cast ").parse(rest)?;
-    let (rest, _) = nom_quantity::parse_mana_spent_self_subject(rest)?;
+    let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(rest)?;
     Ok((
         rest,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ManaSpentToCast {
-                    scope: CastManaObjectScope::TriggeringSpell,
+                    scope,
                     metric: CastManaSpentMetric::FromSource { source_filter },
                 },
             },
@@ -2861,6 +2865,9 @@ fn parse_source_qualified_mana_spent_condition(input: &str) -> OracleResult<'_, 
 
 /// CR 106.3 + CR 601.2h + CR 603.4: Parse
 /// "[N] or more mana from <source-filter> was spent to cast <self>".
+///
+/// CR 400.7d: the subject anaphora selects the scope (see
+/// `parse_source_qualified_mana_spent_condition`).
 fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, n) = parse_number(input)?;
     let (rest, comparator) = alt((
@@ -2872,13 +2879,13 @@ fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, 
     let (rest, _) = tag(" mana from ").parse(rest)?;
     let (rest, source_filter) = nom_quantity::parse_mana_source_filter(rest)?;
     let (rest, _) = tag(" was spent to cast ").parse(rest)?;
-    let (rest, _) = nom_quantity::parse_mana_spent_self_subject(rest)?;
+    let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(rest)?;
     Ok((
         rest,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ManaSpentToCast {
-                    scope: CastManaObjectScope::TriggeringSpell,
+                    scope,
                     metric: CastManaSpentMetric::FromSource { source_filter },
                 },
             },
@@ -2954,7 +2961,9 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
 
     let lhs = QuantityExpr::Ref {
         qty: QuantityRef::ManaSpentToCast {
-            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+            // "the amount of mana you spent" is the triggering-spell intervening-if
+            // (SOS Increment); the trigger event is in scope at evaluation time.
+            scope: CastManaObjectScope::TriggeringSpell,
             metric: crate::types::ability::CastManaSpentMetric::Total,
         },
     };
@@ -2986,6 +2995,9 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
 /// mana-threshold riders, and any future card that gates on triggering-spell
 /// cost magnitude. Complementary to `parse_mana_spent_vs_source_pt` (which
 /// handles Increment-style `greater than this creature's P/T`).
+///
+/// CR 400.7d: the subject anaphora selects the scope — "that spell" stays
+/// `TriggeringSpell`; "this spell"/"it" on a resolving spell is `SelfObject`.
 fn parse_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
     // Number first — combinator verifies word boundary via existing helper.
     let (rest, n) = parse_number(input)?;
@@ -2998,22 +3010,13 @@ fn parse_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> 
     .parse(rest)?;
     // Fixed tail: " mana was spent to cast " + subject anaphora.
     let (rest, _) = tag(" mana was spent to cast ").parse(rest)?;
-    let (rest, _) = alt((
-        tag("that spell"),
-        tag("that creature"),
-        tag("this spell"),
-        tag("this creature"),
-        tag("it"),
-        tag("them"),
-        tag("~"),
-    ))
-    .parse(rest)?;
+    let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(rest)?;
     Ok((
         rest,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ManaSpentToCast {
-                    scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                    scope,
                     metric: crate::types::ability::CastManaSpentMetric::Total,
                 },
             },
@@ -7864,7 +7867,8 @@ mod tests {
                     QuantityExpr::Ref {
                         qty:
                             QuantityRef::ManaSpentToCast {
-                                scope: CastManaObjectScope::TriggeringSpell,
+                                // Subject is "it" → CR 400.7d → SelfObject.
+                                scope: CastManaObjectScope::SelfObject,
                                 metric: CastManaSpentMetric::FromSource { source_filter },
                             },
                     } => match source_filter {
@@ -7898,7 +7902,8 @@ mod tests {
                     QuantityExpr::Ref {
                         qty:
                             QuantityRef::ManaSpentToCast {
-                                scope: CastManaObjectScope::TriggeringSpell,
+                                // Subject is "it" → CR 400.7d → SelfObject.
+                                scope: CastManaObjectScope::SelfObject,
                                 metric: CastManaSpentMetric::FromSource { source_filter },
                             },
                     } => match source_filter {
@@ -7912,6 +7917,56 @@ mod tests {
             }
             other => panic!("expected QuantityComparison, got {other:?}"),
         }
+    }
+
+    /// CR 400.7d: subject anaphora drives `CastManaObjectScope` — "this spell"
+    /// on a resolving spell (Devour Intellect class) → `SelfObject`; "that
+    /// spell" on a triggered ability → `TriggeringSpell`. Proves the building
+    /// block across all three condition constructors.
+    #[test]
+    fn test_mana_spent_condition_subject_drives_scope() {
+        let scope_of = |text: &str| -> CastManaObjectScope {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "input {text:?} should fully parse");
+            match c {
+                StaticCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ManaSpentToCast { scope, .. },
+                        },
+                    ..
+                } => scope,
+                other => panic!("expected ManaSpentToCast QuantityComparison, got {other:?}"),
+            }
+        };
+
+        // Site A — source-qualified positive check.
+        assert_eq!(
+            scope_of("mana from a treasure was spent to cast this spell"),
+            CastManaObjectScope::SelfObject,
+        );
+        assert_eq!(
+            scope_of("mana from a treasure was spent to cast that spell"),
+            CastManaObjectScope::TriggeringSpell,
+        );
+        // Site B — source-qualified threshold.
+        assert_eq!(
+            scope_of("five or more mana from an artifact was spent to cast this spell"),
+            CastManaObjectScope::SelfObject,
+        );
+        assert_eq!(
+            scope_of("five or more mana from an artifact was spent to cast that spell"),
+            CastManaObjectScope::TriggeringSpell,
+        );
+        // Site C — bare total threshold.
+        assert_eq!(
+            scope_of("five or more mana was spent to cast this spell"),
+            CastManaObjectScope::SelfObject,
+        );
+        assert_eq!(
+            scope_of("five or more mana was spent to cast that spell"),
+            CastManaObjectScope::TriggeringSpell,
+        );
     }
 
     #[test]
