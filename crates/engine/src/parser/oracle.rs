@@ -1505,22 +1505,6 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
-        // CR 702.xxx: Prepare (Strixhaven) — `~ enters prepared.` is a self-ETB
-        // rider shorthand (analogous to `enters tapped` / `enters transformed`)
-        // that synthesizes a self-ETB trigger whose effect is BecomePrepared.
-        // Delegated to the oracle_trigger combinator; nom-composed detection.
-        // Normalize self-refs first so lines like "Lluwen enters prepared." (where
-        // the short card name is still the subject) reach the `~`-gated combinator.
-        let prepared_normalized = normalize_self_refs_for_static(&line, card_name);
-        if let Some(mut trigger) =
-            super::oracle_trigger::try_parse_enters_prepared_rider(&prepared_normalized)
-        {
-            trigger.description = Some(line.clone());
-            result.triggers.push(trigger);
-            i += 1;
-            continue;
-        }
-
         // Priority 1: Modal block (standard "Choose one —" + modes, or Spree + modes).
         // Must run before keyword extraction so "Spree" header + follow-on `+` lines
         // are consumed as a modal block, not swallowed as a keyword-only line.

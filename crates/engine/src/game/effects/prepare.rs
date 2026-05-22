@@ -1,11 +1,16 @@
 use std::sync::Arc;
 
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CopyTargetSlot, GameState, WaitingFor};
+use crate::types::game_state::{
+    CastingVariant, CopyTargetSlot, GameState, StackEntry, StackEntryKind, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 use crate::game::ability_utils::{build_resolved_from_def, build_target_slots};
 use crate::game::game_object::PreparedState;
@@ -18,8 +23,8 @@ use crate::game::game_object::PreparedState;
 // exile-event triggers and "going-to-exile" replacement effects (Rest in
 // Peace, Leyline of the Void, Containment Priest) will NOT observe the copy.
 // Acceptable for the SOS-era cards — no card in the set interacts with
-// prepare-copies through those hooks — and aligns with CR 707.10a which
-// already makes spell copies cease to exist off-stack. If a future card
+// prepare-copies through those hooks — and aligned with CR 722.3c's special
+// exception for prepare-spell copies existing in exile. If a future card
 // requires the copy to be a first-class exile GameObject, materialization can
 // be retrofitted around the existing offer scan without touching the resolver
 // layer.
@@ -27,7 +32,6 @@ use crate::game::game_object::PreparedState;
 /// Extract object targets from `ability.targets`, or fall back to `last_created_token_ids`
 /// for `TargetFilter::LastCreated`. Mirrors the pattern used by `suspect::resolve`.
 fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
-    use crate::types::ability::TargetFilter;
     let filter = match &ability.effect {
         Effect::BecomePrepared { target } | Effect::BecomeUnprepared { target } => target,
         _ => return Vec::new(),
@@ -62,12 +66,11 @@ fn has_prepare_face(state: &GameState, object_id: ObjectId) -> bool {
         .is_some_and(|b| matches!(b.layout_kind, Some(LayoutKind::Prepare)))
 }
 
-/// CR 702.xxx: Prepare (Strixhaven) — resolver for `Effect::BecomePrepared`.
+/// CR 722.3a-c: Prepare — resolver for `Effect::BecomePrepared`.
 ///
 /// Idempotent: no-op (and no event emitted) if the target is already prepared
 /// or if the target lacks a prepare face (Biblioplex gate). Otherwise sets
-/// `prepared = Some(PreparedState)` and emits `BecamePrepared`. Assign when
-/// WotC publishes SOS CR update.
+/// `prepared = Some(PreparedState)` and emits `BecamePrepared`.
 pub fn resolve_become_prepared(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -96,12 +99,12 @@ pub fn resolve_become_prepared(
     Ok(())
 }
 
-/// CR 702.xxx: Prepare (Strixhaven) — resolver for `Effect::BecomeUnprepared`.
+/// CR 722.3b: Prepare — resolver for `Effect::BecomeUnprepared`.
 ///
 /// Idempotent: no-op (and no event emitted) if the target is not prepared.
 /// Otherwise clears `prepared` and emits `BecameUnprepared`. Single authority
 /// for the "Doing so unprepares it." consumption — callers must not inspect
-/// the field directly. Assign when WotC publishes SOS CR update.
+/// the field directly.
 pub fn resolve_become_unprepared(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -224,8 +227,7 @@ pub(crate) fn open_copy_target_selection(
 ///
 /// If the prepare-face spell requires targets (e.g., Biblioplex's companion
 /// prepare cards), the caller enters `WaitingFor::CopyRetarget` so the
-/// controller can pick legal targets via `open_copy_target_selection`. Assign
-/// when WotC publishes SOS CR update.
+/// controller can pick legal targets via `open_copy_target_selection`.
 ///
 /// Returns Ok(copy_id) on success. Returns Err if the source is not prepared,
 /// lacks a prepare face, or doesn't exist.
@@ -235,9 +237,6 @@ pub fn cast_prepared_copy(
     controller: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Result<ObjectId, String> {
-    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
-    use crate::types::zones::Zone;
-
     let (src_clone, card_id) = {
         let Some(src_obj) = state.objects.get(&source_id) else {
             return Err(format!("source {source_id:?} not found"));
@@ -286,7 +285,7 @@ pub fn cast_prepared_copy(
     copy_obj.owner = controller;
     copy_obj.zone = Zone::Stack;
     copy_obj.is_token = true;
-    // CR 702.xxx: the copy is a distinct object — clear any per-permanent
+    // CR 722.3c: the copy is a distinct object — clear any per-permanent
     // state carried over from the source's creature face.
     copy_obj.tapped = false;
     copy_obj.prepared = None;
@@ -312,7 +311,7 @@ pub fn cast_prepared_copy(
     });
     events.push(crate::types::events::GameEvent::StackPushed { object_id: copy_id });
 
-    // CR 702.xxx: "Doing so unprepares it." Unprepare-at-cast, not at resolve —
+    // CR 722.3c: "Doing so unprepares it." Unprepare-at-cast, not at resolve —
     // so countered / fizzled copies still leave the source unprepared. Single
     // authority via `unprepare_object`.
     unprepare_object(state, source_id, events);
@@ -323,16 +322,22 @@ pub fn cast_prepared_copy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai_support::legal_actions;
     use crate::game::zones::create_object;
     use crate::parser::oracle_effect::parse_effect;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, QuantityExpr, ReplacementDefinition, TargetFilter,
+    };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::Zone;
 
-    // CR 702.xxx: Parser tests for "becomes prepared" / "becomes unprepared"
-    // imperative patterns. Assign when WotC publishes SOS CR update.
+    // CR 722.3a-b: Parser tests for "becomes prepared" / "becomes unprepared"
+    // imperative patterns.
     #[test]
     fn parse_target_becomes_prepared() {
         let effect = parse_effect("Target creature becomes prepared.");
@@ -366,6 +371,132 @@ mod tests {
         obj.power = Some(2);
         obj.toughness = Some(2);
         id
+    }
+
+    #[test]
+    fn enters_prepared_replacement_marks_permanent_before_priority_actions() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Quill-Blade Laureate".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&object_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.back_face = Some(BackFaceForTest::prepare());
+            obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::BecomePrepared {
+                            target: TargetFilter::SelfRef,
+                        },
+                    ))
+                    .valid_card(TargetFilter::SelfRef),
+            );
+        }
+        state.stack.push_back(StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(state.objects[&object_id].zone, Zone::Battlefield);
+        assert!(state.objects[&object_id].prepared.is_some());
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::BecamePrepared { object_id: id } if *id == object_id)
+        ));
+
+        let actions = legal_actions(&state);
+        assert!(actions.iter().any(
+            |action| matches!(action, GameAction::CastPreparedCopy { source } if *source == object_id)
+        ));
+    }
+
+    #[test]
+    fn effect_zone_move_enters_prepared_replacement_marks_permanent() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Quill-Blade Laureate".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&object_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.back_face = Some(BackFaceForTest::prepare());
+            obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::BecomePrepared {
+                            target: TargetFilter::SelfRef,
+                        },
+                    ))
+                    .valid_card(TargetFilter::SelfRef),
+            );
+        }
+
+        let mut events = Vec::new();
+        let _ = crate::game::effects::change_zone::execute_zone_move(
+            &mut state,
+            object_id,
+            Zone::Hand,
+            Zone::Battlefield,
+            ObjectId(999),
+            None,
+            false,
+            false,
+            None,
+            &[],
+            false,
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&object_id].zone, Zone::Battlefield);
+        assert!(state.objects[&object_id].prepared.is_some());
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::BecamePrepared { object_id: id } if *id == object_id)
+        ));
+
+        let actions = legal_actions(&state);
+        assert!(actions.iter().any(
+            |action| matches!(action, GameAction::CastPreparedCopy { source } if *source == object_id)
+        ));
     }
 
     #[test]
@@ -687,16 +818,24 @@ mod tests {
     struct BackFaceForTest;
     impl BackFaceForTest {
         fn prepare() -> crate::game::game_object::BackFaceData {
+            let mut card_types = crate::types::card_type::CardType::default();
+            card_types.core_types.push(CoreType::Sorcery);
             crate::game::game_object::BackFaceData {
                 name: "Test Prepare Face".to_string(),
                 power: None,
                 toughness: None,
                 loyalty: None,
                 defense: None,
-                card_types: Default::default(),
+                card_types,
                 mana_cost: Default::default(),
                 keywords: Vec::new(),
-                abilities: Vec::new(),
+                abilities: vec![AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )],
                 trigger_definitions: crate::types::definitions::Definitions::default(),
                 replacement_definitions: crate::types::definitions::Definitions::default(),
                 static_definitions: crate::types::definitions::Definitions::default(),
