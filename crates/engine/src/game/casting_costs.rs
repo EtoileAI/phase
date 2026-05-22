@@ -8,7 +8,7 @@ use crate::types::ability::{
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CastPaymentMode, CastingVariant, ConvokeMode, DistributionUnit, GameState, PendingCast,
-    StackEntry, StackEntryKind, WaitingFor,
+    StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -2582,12 +2582,14 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // replacements on X-cost cards like Astral Cornucopia, Walking Ballista, etc.
     let cost_x_paid = ability.chosen_x;
     let kickers_paid = ability.context.kickers_paid.clone();
+    let additional_cost_paid = ability.context.additional_cost_paid;
     let convoked_creatures = state
         .pending_cast
         .as_ref()
         .filter(|pending| pending.object_id == object_id)
         .map(|pending| pending.convoked_creatures.clone())
         .unwrap_or_default();
+    let convoked_creature_count = convoked_creatures.len();
 
     // Determine whether this spell has a meaningful on-resolve ability.
     // Permanent spells with no Spell-kind AbilityDefinition get a placeholder
@@ -2682,6 +2684,23 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         casting_variant,
         actual_mana_spent,
     };
+    let distinct_colors_spent = state
+        .objects
+        .get(&object_id)
+        .map(|obj| obj.colors_spent_to_cast.distinct_colors() as u32)
+        .unwrap_or_default();
+    state.stack_paid_facts.insert(
+        object_id,
+        StackPaidSnapshot {
+            actual_mana_spent,
+            x_value: cost_x_paid,
+            distinct_colors_spent,
+            kickers_paid: kickers_paid.len(),
+            additional_cost_paid,
+            casting_variant,
+            convoked_creatures: convoked_creature_count,
+        },
+    );
 
     // Track commander cast count for tax calculation
     if was_in_command_zone {

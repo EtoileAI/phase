@@ -8,11 +8,12 @@ import {
 } from "../../utils/stackPressure.ts";
 import { StackTargetArcs } from "./StackTargetArcs.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
-import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, WaitingFor } from "../../adapter/types.ts";
+import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, StackEntryDisplay, WaitingFor } from "../../adapter/types.ts";
 import { getStackCardSize } from "../board/boardSizing.ts";
 
 const EMPTY_STACK: StackEntryType[] = [];
 const EMPTY_GROUPS: StackDisplayGroup[] = [];
+const EMPTY_DETAILS: Record<string, StackEntryDisplay> = {};
 
 // CR 601.2a + CR 601.2b-f: Post-announcement, the spell sits on the engine's
 // stack while modes/targets/costs are chosen. This helper identifies the
@@ -78,6 +79,9 @@ export function StackDisplay() {
   const groups = useGameStore(
     (s) => s.gameState?.derived?.stack_display_groups ?? EMPTY_GROUPS,
   );
+  const stackEntryDetails = useGameStore(
+    (s) => s.gameState?.derived?.stack_entry_details ?? EMPTY_DETAILS,
+  );
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [viewport, setViewport] = useState(getViewportSize);
   const [hoveredStackEntryId, setHoveredStackEntryId] = useState<ObjectId | null>(null);
@@ -123,6 +127,12 @@ export function StackDisplay() {
           .filter((x): x is { entry: StackEntryType; count: number } => x !== null)
       : stack.map((entry) => ({ entry, count: 1 }));
   const displayStack = groupedStack.map((g) => g.entry);
+  const stackEntryRepresentatives = new Map<ObjectId, ObjectId>();
+  for (const group of groups) {
+    for (const memberId of group.member_ids) {
+      stackEntryRepresentatives.set(memberId, group.representative);
+    }
+  }
   const rawCardSize = getStackCardSize(displayStack.length);
   const widthScale =
     viewport.width < 640 ? 0.58 :
@@ -252,6 +262,7 @@ export function StackDisplay() {
                       style={entryStyles[index]}
                       pacingMultiplier={pacing}
                       groupCount={count}
+                      details={stackEntryDetails[String(entry.id)]}
                     />
                   ));
                 })()}
@@ -263,6 +274,8 @@ export function StackDisplay() {
           stack={displayStack}
           activeEntryId={activeStackEntryId}
           isCollapsed={isCollapsed}
+          detailsByEntry={stackEntryDetails}
+          stackEntryRepresentatives={stackEntryRepresentatives}
         />
       </motion.div>
     </AnimatePresence>

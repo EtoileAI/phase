@@ -7301,6 +7301,7 @@ pub fn handle_cancel_cast(
             .rposition(|entry| entry.id == pending.object_id)
         {
             state.stack.remove(pos);
+            state.stack_paid_facts.remove(&pending.object_id);
         }
     }
 }

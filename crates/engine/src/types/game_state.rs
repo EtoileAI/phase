@@ -3144,6 +3144,10 @@ pub enum CastingVariant {
 }
 
 impl CastingVariant {
+    pub fn is_normal(&self) -> bool {
+        *self == CastingVariant::Normal
+    }
+
     pub fn exiles_when_leaving_stack_for_any_reason(self) -> bool {
         matches!(
             self,
@@ -3221,6 +3225,28 @@ pub enum StackEntryKind {
     KeywordAction { action: KeywordAction },
 }
 
+/// Display-safe public payment facts captured when a spell is finalized onto
+/// the stack. Some underlying cast bookkeeping is transient and intentionally
+/// cleared after trigger collection, but the stack UI still needs the paid
+/// facts while the spell remains pending.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackPaidSnapshot {
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub actual_mana_spent: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_value: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub distinct_colors_spent: u32,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub kickers_paid: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub additional_cost_paid: bool,
+    #[serde(default, skip_serializing_if = "CastingVariant::is_normal")]
+    pub casting_variant: CastingVariant,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub convoked_creatures: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub turn_number: u32,
@@ -3238,6 +3264,8 @@ pub struct GameState {
     // Shared zones
     pub battlefield: im::Vector<ObjectId>,
     pub stack: im::Vector<StackEntry>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub stack_paid_facts: HashMap<ObjectId, StackPaidSnapshot>,
     pub exile: im::Vector<ObjectId>,
 
     /// Objects in the command zone (commanders, emblems).
@@ -4245,6 +4273,7 @@ impl GameState {
             next_object_id: 1,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
+            stack_paid_facts: HashMap::new(),
             exile: im::Vector::new(),
             command_zone: im::Vector::new(),
             rng_seed: seed,
@@ -4531,6 +4560,7 @@ impl PartialEq for GameState {
             && self.next_object_id == other.next_object_id
             && self.battlefield == other.battlefield
             && self.stack == other.stack
+            && self.stack_paid_facts == other.stack_paid_facts
             && self.exile == other.exile
             && self.command_zone == other.command_zone
             && self.rng_seed == other.rng_seed

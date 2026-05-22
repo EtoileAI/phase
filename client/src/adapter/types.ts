@@ -777,14 +777,23 @@ export interface CombatState {
 export interface ResolvedAbility {
   targets: TargetRef[];
   sub_ability?: ResolvedAbility;
+  else_ability?: ResolvedAbility;
+  description?: string;
 }
 
 // ── Stack ────────────────────────────────────────────────────────────────
 
+export type KeywordAction =
+  | { Equip: { equipment_id: ObjectId; target_creature_id: ObjectId } }
+  | { Crew: { vehicle_id: ObjectId; paid_creature_ids: ObjectId[] } }
+  | { Saddle: { mount_id: ObjectId; paid_creature_ids: ObjectId[] } }
+  | { Station: { spacecraft_id: ObjectId; paid_creature_id: ObjectId; snapshot_power: number } };
+
 export type StackEntryKind =
   | { type: "Spell"; data: { card_id: CardId; ability?: ResolvedAbility; actual_mana_spent?: number } }
   | { type: "ActivatedAbility"; data: { source_id: ObjectId; ability: ResolvedAbility } }
-  | { type: "TriggeredAbility"; data: { source_id: ObjectId; ability: ResolvedAbility; description?: string; source_name?: string } };
+  | { type: "TriggeredAbility"; data: { source_id: ObjectId; ability: ResolvedAbility; description?: string; source_name?: string } }
+  | { type: "KeywordAction"; data: { action: KeywordAction } };
 
 export interface StackEntry {
   id: ObjectId;
@@ -804,6 +813,35 @@ export interface StackDisplayGroup {
   representative: ObjectId;
   count: number;
   member_ids: ObjectId[];
+}
+
+export interface StackTargetDisplay {
+  target: TargetRef;
+  label: string;
+}
+
+export type StackPaidFactView =
+  | { type: "XValue"; data: { value: number } }
+  | { type: "ManaSpent"; data: { amount: number } }
+  | { type: "ColorsSpent"; data: { distinct: number } }
+  | { type: "Kicked"; data: { count: number } }
+  | { type: "AdditionalCostPaid" }
+  | { type: "CastVariant"; data: { variant: string } }
+  | { type: "Convoked"; data: { count: number } };
+
+export interface TriggerContextDisplay {
+  label: string;
+  object_id?: ObjectId;
+  player?: PlayerId;
+}
+
+export interface StackEntryDisplay {
+  source_name: string;
+  kind_label: string;
+  ability_description?: string;
+  targets?: StackTargetDisplay[];
+  paid?: StackPaidFactView[];
+  trigger_context?: TriggerContextDisplay[];
 }
 
 // ── Pending Cast (for target selection) ──────────────────────────────────
@@ -1430,6 +1468,12 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::stack_display_groups`.
    */
   stack_display_groups?: StackDisplayGroup[];
+  /**
+   * Engine-authored display details keyed by stack entry id. Includes targets,
+   * selected paid-cost facts, and public trigger context so stack UI does not
+   * infer game logic from raw abilities.
+   */
+  stack_entry_details?: Record<string, StackEntryDisplay>;
   /**
    * Engine-authored "Auras attached to player X" projection. Players have no
    * `attachments` back-link on the GameObject side because they aren't

@@ -120,7 +120,7 @@ export function DebugPanel() {
 
   const handleRestore = useCallback(async (state: GameState) => {
     setStatus(null);
-    const err = await restoreGameState(state);
+    const err = await restoreGameState(state, { preserveCheckpoints: true });
     if (err) {
       setStatus({ type: "error", message: err });
     } else {
@@ -350,9 +350,12 @@ export function DebugPanel() {
                 <button
                   key={i}
                   onClick={() => handleRestore(cp)}
-                  className="rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
+                  className="flex items-center justify-between gap-2 rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
                 >
-                  Turn {cp.turn_number} &middot; Player {cp.active_player}
+                  <span>Turn {cp.turn_number}</span>
+                  <span className="rounded bg-blue-500/20 px-1.5 py-0.5 font-semibold text-blue-200">
+                    Player {cp.active_player}
+                  </span>
                 </button>
               ))}
             </div>
