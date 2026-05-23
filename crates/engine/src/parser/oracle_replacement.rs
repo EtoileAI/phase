@@ -438,6 +438,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- Life-floor damage replacement: "if you control a [filter], damage that would
+    // reduce your life total to less than N reduces it to N instead" ---
+    // CR 614.1a: Worship-class replacement effect.
+    if let Some(def) = parse_life_floor_damage_replacement(&norm_lower) {
+        return Some(def);
+    }
+
     None
 }
 
@@ -4606,6 +4613,69 @@ fn parse_generic_unless_condition(
     Some(ReplacementCondition::Unrecognized {
         text: condition_text.trim_end_matches('.').to_string(),
     })
+}
+
+/// CR 614.1a: Parse "if you control a [filter], damage that would reduce
+/// your life total to less than N reduces it to N instead." (Worship class).
+///
+/// Returns a `ReplacementDefinition` with:
+/// - `event`: `DamageDone`
+/// - `condition`: `IfControlsMatching { filter }` (controller scope)
+/// - `damage_modification`: `LifeFloor { minimum: N }`
+/// - `damage_target_filter`: `DamageTargetFilter::Player(Controller)`
+fn parse_life_floor_damage_replacement(norm_lower: &str) -> Option<ReplacementDefinition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if you control ")
+        .parse(norm_lower)
+        .ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+        .parse(rest)
+        .ok()?;
+
+    let (after_threshold, filter_text) = terminated(
+        take_until::<_, _, OracleError<'_>>(
+            ", damage that would reduce your life total to less than ",
+        ),
+        tag::<_, _, OracleError<'_>>(", damage that would reduce your life total to less than "),
+    )
+    .parse(rest)
+    .ok()?;
+
+    let (tail, minimum) = nom_primitives::parse_number.parse(after_threshold).ok()?;
+    let (tail, floor_val) = preceded(
+        tag::<_, _, OracleError<'_>>(" reduces it to "),
+        nom_primitives::parse_number,
+    )
+    .parse(tail)
+    .ok()?;
+    if floor_val != minimum {
+        return None;
+    }
+    let (_, _) = all_consuming((
+        tag::<_, _, OracleError<'_>>(" instead"),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(tail)
+    .ok()?;
+
+    // Build the controller-scoped filter (e.g., "creature you control").
+    let (filter, leftover) = parse_type_phrase(filter_text);
+    if filter == TargetFilter::Any || !leftover.trim().is_empty() {
+        return None;
+    }
+    let condition_filter = inject_controller(filter, ControllerRef::You);
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .condition(ReplacementCondition::IfControlsMatching {
+                filter: condition_filter,
+            })
+            .damage_modification(DamageModification::LifeFloor {
+                minimum: minimum as i32,
+            })
+            .damage_target_filter(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Controller,
+            }),
+    )
 }
 
 #[cfg(test)]
@@ -8945,6 +9015,53 @@ mod tests {
             }
             other => panic!("expected Scry execute, got {other:?}"),
         }
+    }
+
+    /// CR 614.1a: Worship — "If you control a creature, damage that would
+    /// reduce your life total to less than 1 reduces it to 1 instead."
+    /// Verifies: DamageDone event, IfControlsMatching(creature), LifeFloor(1),
+    /// damage target = Controller.
+    #[test]
+    fn parses_worship_life_floor_replacement() {
+        let def = parse_replacement_line(
+            "If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.",
+            "Worship",
+        )
+        .expect("Worship should parse as a DamageDone replacement");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+
+        match &def.condition {
+            Some(ReplacementCondition::IfControlsMatching { filter }) => {
+                let is_creature = match filter {
+                    TargetFilter::Typed(tf) => tf.type_filters.contains(&TypeFilter::Creature),
+                    TargetFilter::And { filters } => filters.iter().any(|f| {
+                        matches!(f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                    }),
+                    _ => false,
+                };
+                assert!(
+                    is_creature,
+                    "condition filter should be Creature, got {:?}",
+                    filter
+                );
+            }
+            other => panic!("condition should be IfControlsMatching, got {:?}", other),
+        }
+
+        assert_eq!(
+            def.damage_modification,
+            Some(crate::types::ability::DamageModification::LifeFloor { minimum: 1 }),
+            "damage modification should be LifeFloor(1)"
+        );
+
+        assert_eq!(
+            def.damage_target_filter,
+            Some(crate::types::ability::DamageTargetFilter::Player {
+                player: crate::types::ability::DamageTargetPlayerScope::Controller
+            }),
+            "damage target should be Controller"
+        );
     }
 }
 
