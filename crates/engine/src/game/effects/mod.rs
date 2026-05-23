@@ -62,6 +62,7 @@ pub mod double;
 pub mod draw;
 pub mod drawn_this_turn_choice;
 pub mod effect;
+pub mod endure;
 pub mod energy;
 pub mod exchange_control;
 pub mod exile_from_top_until;
@@ -1250,9 +1251,10 @@ pub fn resolve_effect(
         Effect::RuntimeHandled { .. } => Ok(()), // Handled by dedicated engine path
         Effect::Learn => learn::resolve(state, ability, events),
         Effect::BlightEffect { .. } => blight::resolve(state, ability, events),
-        Effect::Forage | Effect::Endure { .. } => {
-            // These keyword actions are recognized by the parser but not yet implemented.
-            // They're no-ops at runtime but count as supported for coverage.
+        Effect::Endure { .. } => endure::resolve(state, ability, events),
+        Effect::Forage => {
+            // This keyword action is recognized by the parser but not yet implemented.
+            // It's a no-op at runtime but counts as supported for coverage.
             Ok(())
         }
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),

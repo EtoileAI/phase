@@ -4957,7 +4957,10 @@ pub(super) fn parse_imperative_family_ast(
                 .parse(lower)
                 .map(|(r, _)| r)
                 .unwrap_or("");
-            let count = nom_primitives::parse_number
+            // CR 701.63b: "endure X" degrades to 0 (nothing happens). parse_number_or_x
+            // maps a bare "x" to 0; the unwrap fallback only applies when no count token
+            // is present at all.
+            let count = nom_primitives::parse_number_or_x
                 .parse(rest.trim())
                 .map(|(_, n)| n)
                 .unwrap_or(1);

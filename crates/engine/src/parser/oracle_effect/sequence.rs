@@ -3,6 +3,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, opt, value};
+use nom::sequence::preceded;
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
@@ -1026,6 +1027,20 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("players can't ")),
         value((), tag("players cannot ")),
     )))
+    // CR 701.63: "<self-ref subject> endures N" as a conjunct ("you lose 1
+    // life and this creature endures 1" — Sinkhole Surveyor). The self-ref
+    // subject axis (it / this creature / ~) is composed with the "endures "
+    // verb as a single unit, not enumerated per permutation. A self-ref
+    // pronoun/phrase followed by the conjugated keyword-action verb is always
+    // a subject-predicate clause start, never a noun-phrase continuation.
+    .or(preceded(
+        alt((
+            tag::<_, _, OracleError<'_>>("it "),
+            tag("this creature "),
+            tag("~ "),
+        )),
+        value((), tag("endures ")),
+    ))
     .parse(s)
     .is_ok();
     if has_verb_prefix {

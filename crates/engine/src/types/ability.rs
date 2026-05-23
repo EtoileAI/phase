@@ -6214,7 +6214,9 @@ pub enum Effect {
         #[serde(default = "default_one")]
         amount: u32,
     },
-    /// Endure N — if this creature would die, instead remove N damage from it.
+    /// CR 701.63a: Endure N — the enduring permanent's controller chooses: create an
+    /// N/N white Spirit creature token, or put N +1/+1 counters on that permanent.
+    /// CR 701.63b: Endure 0 does nothing.
     Endure {
         amount: u32,
     },

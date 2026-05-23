@@ -20504,6 +20504,81 @@ mod tests {
         assert!(matches!(e, Effect::Explore));
     }
 
+    // CR 701.63: "you lose 1 life and this creature endures 1" (Sinkhole
+    // Surveyor) — the bare-" and " chain splitter must recognize the self-ref
+    // "<subject> endures N" conjunct as a clause start, or the LoseLife parser
+    // greedily swallows the whole chunk and the endure clause is dropped.
+    #[test]
+    fn effect_chain_lose_life_and_endure_keeps_both_clauses() {
+        let def = parse_effect_chain(
+            "you lose 1 life and this creature endures 1",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::LoseLife { .. }),
+            "expected LoseLife head, got {:?}",
+            def.effect
+        );
+        let sub = def
+            .sub_ability
+            .expect("endure conjunct must survive as a sub_ability");
+        assert!(
+            matches!(*sub.effect, Effect::Endure { amount: 1 }),
+            "expected chained Endure{{1}}, got {:?}",
+            sub.effect
+        );
+    }
+
+    // CR 701.63: Endure — every printed card prefixes a self-referential
+    // subject ("it endures N", "this creature endures N", "~ endures N" after
+    // card-name normalization). The subject layer must strip the subject so the
+    // deconjugated predicate ("endure N") re-dispatches to `Effect::Endure`.
+    // Without "endure" in PREDICATE_VERBS these all fell through to
+    // `Effect::Unimplemented`, leaving the entire endure card pool runtime-dead.
+    #[test]
+    fn effect_it_endures_strips_subject_to_endure() {
+        let e = parse_effect("it endures 1");
+        assert!(
+            matches!(e, Effect::Endure { amount: 1 }),
+            "expected Endure{{amount:1}}, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_this_creature_endures_strips_subject_to_endure() {
+        let e = parse_effect("this creature endures 2");
+        assert!(
+            matches!(e, Effect::Endure { amount: 2 }),
+            "expected Endure{{amount:2}}, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_self_ref_endures_strips_subject_to_endure() {
+        // "~" is the normalized self-reference card-name subjects collapse to
+        // ("Fortress Kin-Guard endures N" → "~ endures N" upstream).
+        let e = parse_effect("~ endures 3");
+        assert!(
+            matches!(e, Effect::Endure { amount: 3 }),
+            "expected Endure{{amount:3}}, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_endure_dynamic_x_degrades_gracefully() {
+        // CR 701.63b: "it endures X, where X is ..." cannot fit the `amount: u32`
+        // field. It must degrade to a benign value (endure 0 = nothing happens),
+        // never panic. Documented follow-up: dynamic endure amount.
+        let e = parse_effect("it endures X");
+        assert!(
+            matches!(
+                e,
+                Effect::Endure { amount: 0 } | Effect::Unimplemented { .. }
+            ),
+            "dynamic endure X must degrade to Endure{{0}} or Unimplemented, got {e:?}"
+        );
+    }
+
     #[test]
     fn effect_target_creature_explores_uses_target_only_chain() {
         let def = parse_effect_chain("Target creature explores", AbilityKind::Spell);
