@@ -136,6 +136,7 @@ pub mod shuffle;
 pub mod skip_next_step;
 pub mod skip_next_turn;
 pub mod solve_case;
+pub mod specialize;
 pub mod speed_effects;
 pub mod surveil;
 pub mod suspect;
@@ -1818,6 +1819,7 @@ pub fn resolve_effect(
         Effect::Incubate { .. } => incubate::resolve(state, ability, events),
         Effect::Amass { .. } => amass::resolve(state, ability, events),
         Effect::Monstrosity { .. } => monstrosity::resolve(state, ability, events),
+        Effect::Specialize => specialize::resolve(state, ability, events),
         Effect::Renown { .. } => renown::resolve(state, ability, events),
         Effect::Adapt { .. } => adapt::resolve(state, ability, events),
         Effect::Bolster { .. } => bolster::resolve(state, ability, events),
