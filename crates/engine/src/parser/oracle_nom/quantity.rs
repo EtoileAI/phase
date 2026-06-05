@@ -2545,7 +2545,7 @@ fn parse_for_each_recipient_shared_quality(input: &str) -> OracleResult<'_, Quan
         opt(alt((value((), tag("other ")), value((), tag("another "))))).parse(input)?;
     let (rest, type_filter) = parse_type_filter_word(rest)?;
     let (rest, _) = tag(" on the battlefield ").parse(rest)?;
-    let (rest, shared_quality) = parse_shared_quality_clause(rest)?;
+    let (rest, shared_quality) = parse_shared_quality_clause(rest, &ParseContext::default())?;
 
     let mut properties = Vec::new();
     if has_other.is_some() {
@@ -2920,6 +2920,94 @@ mod tests {
             },
             other => panic!("expected ObjectCount, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_for_each_clause_expr_other_attacking_creature_sharing_type() {
+        let expr = crate::parser::oracle_quantity::parse_for_each_clause_expr(
+            "other attacking creature that shares a creature type with it",
+        )
+        .expect("for-each expr");
+        assert!(matches!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_for_each_other_attacking_creature_sharing_via_oracle_quantity_fallback() {
+        let qty = crate::parser::oracle_quantity::parse_for_each_clause(
+            "other attacking creature that shares a creature type with it",
+        )
+        .expect("oracle_quantity type-phrase fallback should parse Shared Animosity for-each");
+        let QuantityRef::ObjectCount { filter } = qty else {
+            panic!("expected object count");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed");
+        };
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn parse_for_each_other_attacking_goblin_via_type_phrase_fallback() {
+        let qty = crate::parser::oracle_quantity::parse_for_each_clause("other attacking Goblin")
+            .expect("oracle_quantity fallback should parse other attacking Goblin");
+        assert!(matches!(
+            qty,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_for_each_other_attacking_creature_sharing_type_with_it() {
+        use crate::types::ability::{
+            ControllerRef, FilterProp, SharedQuality, SharedQualityRelation, TargetFilter,
+            TypeFilter, TypedFilter,
+        };
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            ..Default::default()
+        };
+        let qty = crate::parser::oracle_quantity::parse_for_each_clause_with_context(
+            "other attacking creature that shares a creature type with it",
+            &ctx,
+        )
+        .expect("for-each clause with trigger subject");
+        let QuantityRef::ObjectCount { filter } = qty else {
+            panic!("expected object count");
+        };
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            properties,
+            ..
+        }) = filter
+        else {
+            panic!("expected typed filter");
+        };
+        assert_eq!(type_filters, vec![TypeFilter::Creature]);
+        assert!(properties.contains(&FilterProp::Another));
+        assert!(properties.contains(&FilterProp::Attacking));
+        assert!(properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(reference.as_ref(), TargetFilter::TriggeringSource)
+        )));
     }
 
     #[test]

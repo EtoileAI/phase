@@ -12,7 +12,7 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_for_each_clause,
-    parse_for_each_clause_expr,
+    parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_with_ctx,
@@ -2334,7 +2334,7 @@ fn target_relative_clause_owns_suffix(input: &str) -> bool {
     else {
         return false;
     };
-    let Some((_, consumed)) = parse_that_clause_suffix(relative_clause) else {
+    let Some((_, consumed)) = parse_that_clause_suffix(relative_clause, None) else {
         return false;
     };
     let remaining = &relative_clause[consumed..];
@@ -4041,13 +4041,21 @@ pub(crate) fn try_parse_pump(lower: &str, _text: &str) -> Option<Effect> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Option<Duration>)> {
+    parse_pump_clause_with_context(predicate, &ParseContext::default())
+}
+
+pub(crate) fn parse_pump_clause_with_context(
+    predicate: &str,
+    ctx: &ParseContext,
+) -> Option<(PtValue, PtValue, Option<Duration>)> {
     let predicate_lower = predicate.to_lowercase();
     let predicate_tp = TextPair::new(predicate, &predicate_lower);
     let (without_where, where_x_expression) = strip_trailing_where_x(predicate_tp);
     // Strip "for each [clause]" suffix before duration extraction.
     let (without_for_each, for_each_qty) =
-        strip_trailing_for_each_clause_expr(without_where.original);
+        strip_trailing_for_each_clause_expr(without_where.original, ctx);
     let (without_duration, duration) = strip_trailing_duration(without_for_each);
     let lower = without_duration.to_lowercase();
 
@@ -4087,11 +4095,14 @@ pub(crate) fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Op
 /// Strip a trailing "for each [clause]" from pump text, returning the remaining text
 /// and the parsed QuantityExpr (if any). Handles both "until end of turn for each X"
 /// (duration already stripped) and bare "for each X".
-fn strip_trailing_for_each_clause_expr(text: &str) -> (&str, Option<QuantityExpr>) {
+fn strip_trailing_for_each_clause_expr<'a>(
+    text: &'a str,
+    ctx: &ParseContext,
+) -> (&'a str, Option<QuantityExpr>) {
     let lower = text.to_lowercase();
     if let Some(pos) = lower.rfind(" for each ") {
         let clause_text = lower[pos + " for each ".len()..].trim_end_matches('.');
-        if let Some(quantity) = parse_for_each_clause_expr(clause_text) {
+        if let Some(quantity) = parse_for_each_clause_expr_with_context(clause_text, ctx) {
             return (text[..pos].trim(), Some(quantity));
         }
     }
