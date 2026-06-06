@@ -2518,7 +2518,7 @@ mod tests {
 
     #[test]
     fn extract_keyword_line_transmute() {
-        // CR 702.52a: Transmute {cost} — single-keyword line with parameterized cost
+        // CR 702.53a: Transmute {cost} — single-keyword line with parameterized cost
         let mtgjson_kws = vec!["transmute".to_string()];
 
         // Verify parse_keyword_from_oracle works directly

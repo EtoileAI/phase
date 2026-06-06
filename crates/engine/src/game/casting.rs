@@ -1,9 +1,9 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
     CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, CostObjectCount,
-    Duration, Effect, GameRestriction, ModalSelectionCondition, ObjectScope, PlayerScope,
-    ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope,
-    StaticDefinition, TargetFilter, TargetRef,
+    CostPaidObjectSnapshot, Duration, Effect, GameRestriction, ModalSelectionCondition,
+    ObjectScope, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility,
+    RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -9903,6 +9903,35 @@ fn find_non_self_discard(cost: &AbilityCost) -> Option<(&QuantityExpr, Option<&T
     }
 }
 
+fn has_self_ref_discard_cost(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Discard { self_ref: true, .. } => true,
+        AbilityCost::Composite { costs } => costs.iter().any(has_self_ref_discard_cost),
+        _ => false,
+    }
+}
+
+/// CR 117.1 + CR 400.7j + CR 608.2k: Self-discard activation costs move the
+/// source out of hand before the ability resolves, so ability-scoped filters
+/// like Transmute's same-mana-value search need a public-characteristics
+/// snapshot attached to the resolving ability before cost payment.
+pub(crate) fn stamp_self_ref_discard_cost_paid_object(
+    state: &GameState,
+    source_id: ObjectId,
+    ability: &mut ResolvedAbility,
+    cost: &AbilityCost,
+) {
+    if !has_self_ref_discard_cost(cost) {
+        return;
+    }
+    if let Some(obj) = state.objects.get(&source_id) {
+        ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+            object_id: source_id,
+            lki: obj.snapshot_for_mana_spent(),
+        });
+    }
+}
+
 /// CR 118.3 + CR 602.2b: Detect a non-self "exile a card from hand/graveyard"
 /// activation cost requiring interactive card selection (Jhoira of the Ghitu).
 /// Self-ref exile (Scavenge, Suspend) returns `None` — that shape is auto-paid
@@ -11016,6 +11045,7 @@ pub fn handle_activate_ability(
                         ability_index,
                     ));
                 }
+                stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
                 if let AbilityCostPaymentOutcome::Paused { remaining_cost } =
                     pay_ability_cost_for_activation(state, player, source_id, cost, events)?
                 {
@@ -11105,6 +11135,7 @@ pub fn handle_activate_ability(
                 ability_index,
             ));
         }
+        stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
         if let AbilityCostPaymentOutcome::Paused { remaining_cost } =
             pay_ability_cost_for_activation(state, player, source_id, cost, events)?
         {
@@ -34838,6 +34869,99 @@ mod tests {
         assert!(
             !state.battlefield.contains(&ent),
             "Generous Ent must not be a battlefield permanent after Forestcycling resolves"
+        );
+    }
+
+    /// CR 702.53a: Transmute searches for a card with the same mana value as
+    /// the discarded card. This exercises the full runtime path where paying
+    /// the self-discard cost snapshots the discarded object before the search
+    /// filter resolves `QuantityRef::ObjectManaValue { CostPaidObject }`.
+    #[test]
+    fn transmute_search_uses_discarded_cards_mana_value() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let transmute_card = scenario
+            .add_creature_to_hand(P0, "Test Transmuter", 2, 2)
+            .with_mana_cost(ManaCost::generic(3))
+            .from_oracle_text("Transmute {1}{U}{B}")
+            .id();
+        let same_mana_value = scenario
+            .add_spell_to_library_top(P0, "Same Mana Value", false)
+            .with_mana_cost(ManaCost::generic(3))
+            .id();
+        scenario
+            .add_spell_to_library_top(P0, "Wrong Mana Value", false)
+            .with_mana_cost(ManaCost::generic(2));
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Colorless, ObjectId(9_990), false, vec![]),
+                ManaUnit::new(ManaType::Blue, ObjectId(9_991), false, vec![]),
+                ManaUnit::new(ManaType::Black, ObjectId(9_992), false, vec![]),
+            ],
+        );
+
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let transmute_idx = state
+            .objects
+            .get(&transmute_card)
+            .unwrap()
+            .abilities
+            .iter()
+            .position(|ability| matches!(ability.kind, AbilityKind::Activated))
+            .expect("synthesized transmute activated ability");
+        assert!(
+            can_activate_ability_now(state, PlayerId(0), transmute_card, transmute_idx),
+            "transmute ability should be activatable from hand at sorcery speed"
+        );
+
+        let mut events = Vec::new();
+        handle_activate_ability(
+            state,
+            PlayerId(0),
+            transmute_card,
+            transmute_idx,
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects[&transmute_card].zone,
+            Zone::Graveyard,
+            "transmute discards the source card as an activation cost"
+        );
+
+        crate::game::stack::resolve_top(state, &mut events);
+        let search_cards = match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => cards.clone(),
+            other => {
+                panic!("expected Transmute to ask for a same-mana-value search, got {other:?}")
+            }
+        };
+        assert_eq!(
+            search_cards,
+            vec![same_mana_value],
+            "Transmute must offer only cards whose mana value matches the discarded card"
+        );
+
+        crate::game::engine::apply_as_current(
+            state,
+            GameAction::SelectCards {
+                cards: vec![same_mana_value],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.objects[&same_mana_value].zone,
+            Zone::Hand,
+            "Transmute should put the selected same-mana-value card into hand"
         );
     }
 

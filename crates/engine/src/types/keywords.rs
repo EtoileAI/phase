@@ -777,8 +777,10 @@ pub enum Keyword {
     /// CR 702.99a: Cipher — exile this spell encoded on a creature you control;
     /// whenever that creature deals combat damage to a player, cast a copy.
     Cipher,
-    /// CR 702.52a: Transmute {cost} — discard this card and pay {cost} to search
-    /// your library for a card with the same mana value.
+    /// CR 702.53a: Transmute {cost} — "[Cost], Discard this card: Search your
+    /// library for a card with the same mana value as the discarded card, reveal
+    /// it, put it into your hand, then shuffle. Activate only as a sorcery."
+    /// Runtime: `synthesize_transmute` (database/synthesis.rs).
     Transmute(ManaCost),
     /// CR 702.120a: Escalate [cost] — additional cost for each mode chosen beyond the first
     /// on a modal spell.
@@ -1806,7 +1808,7 @@ impl FromStr for Keyword {
                     let capitalized = capitalize_first(type_str);
                     return Ok(Keyword::Champion(capitalized));
                 }
-                // CR 702.52a: Transmute {cost}
+                // CR 702.53a: Transmute {cost}
                 "transmute" => return Ok(Keyword::Transmute(parse_keyword_mana_cost(p))),
                 // CR 702.120a: Escalate [cost]
                 "escalate" => {
@@ -2590,7 +2592,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             })
         }
         // CR 702.47a / CR 702.166a / CR 702.43a / CR 702.72a / CR 702.149a
-        // CR 702.132a / CR 702.133a / CR 702.99a / CR 702.52a / CR 702.148a / CR 702.125a
+        // CR 702.132a / CR 702.133a / CR 702.99a / CR 702.53a / CR 702.148a / CR 702.125a
         "Splice" => Ok(Keyword::Splice(data.as_str().unwrap_or("").to_string())),
         "Bargain" => Ok(Keyword::Bargain),
         "Sunburst" => Ok(Keyword::Sunburst),

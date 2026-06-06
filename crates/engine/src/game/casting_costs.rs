@@ -1663,7 +1663,7 @@ pub(super) fn push_activated_ability_to_stack(
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
-    resolved: ResolvedAbility,
+    mut resolved: ResolvedAbility,
     remaining_cost: Option<&crate::types::ability::AbilityCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -1686,6 +1686,12 @@ pub(super) fn push_activated_ability_to_stack(
                 ability_index,
             ));
         }
+        super::casting::stamp_self_ref_discard_cost_paid_object(
+            state,
+            source_id,
+            &mut resolved,
+            cost,
+        );
         if let super::casting::AbilityCostPaymentOutcome::Paused { remaining_cost } =
             super::casting::pay_ability_cost_for_activation(state, player, source_id, cost, events)?
         {

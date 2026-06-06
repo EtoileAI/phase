@@ -1633,6 +1633,105 @@ pub fn synthesize_cycling(face: &mut CardFace) {
     face.abilities.extend(cycling_abilities);
 }
 
+/// CR 702.53a: Synthesize Transmute into an activated ability that functions
+/// only while the card is in a player's hand. "Transmute [cost]" means
+/// "[Cost], Discard this card: Search your library for a card with the same mana
+/// value as the discarded card, reveal that card, and put it into your hand.
+/// Then shuffle your library. Activate only as a sorcery."
+///
+/// Mirrors `synthesize_cycling`'s Typecycling arm (discard-self + mana cost →
+/// `SearchLibrary` → put the found card to hand → shuffle, activatable from
+/// hand), swapping the subtype filter for a same-mana-value filter and adding the
+/// sorcery-speed restriction. Unlike Cycling/Typecycling it carries no
+/// `AbilityTag::Cycling` — transmute is not a cycling ability (CR 702.29).
+pub fn synthesize_transmute(face: &mut CardFace) {
+    let transmute_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Transmute(cost) => {
+                // CR 702.53a + CR 601.2b/f–h: "[Cost], Discard this card".
+                let composite_cost = AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana { cost: cost.clone() },
+                        AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: None,
+                            random: false,
+                            self_ref: true,
+                        },
+                    ],
+                };
+                let filter = transmute_same_mana_value_filter();
+                // CR 702.53a: "Then shuffle your library."
+                let shuffle_def = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Shuffle {
+                        target: TargetFilter::Controller,
+                    },
+                );
+                // CR 702.53a: "reveal that card, and put it into your hand."
+                let mut put_in_hand_def = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Library),
+                        destination: Zone::Hand,
+                        target: TargetFilter::Any,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: false,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                    },
+                );
+                put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
+                // CR 702.53a: "Search your library for a card with the same mana
+                // value as the discarded card ... Activate only as a sorcery."
+                let mut def = AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::SearchLibrary {
+                        filter,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        reveal: true,
+                        target_player: None,
+                        selection_constraint: SearchSelectionConstraint::None,
+                        split: None,
+                        source_zones: vec![crate::types::zones::Zone::Library],
+                    },
+                )
+                .cost(composite_cost)
+                .sorcery_speed();
+                // CR 702.53b: the ability functions only while the card is in hand.
+                def.activation_zone = Some(Zone::Hand);
+                def.sub_ability = Some(Box::new(put_in_hand_def));
+                Some(def)
+            }
+            _ => None,
+        })
+        .collect();
+
+    face.abilities.extend(transmute_abilities);
+}
+
+/// CR 702.53a: "a card with the same mana value as the discarded card." The
+/// discarded card is the transmute card itself, paid as the discard cost, so the
+/// filter compares a library card's mana value to the cost-paid object's mana
+/// value via `ObjectScope::CostPaidObject` — the same scope the parser emits for
+/// "with the same mana value as that card".
+fn transmute_same_mana_value_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+        comparator: Comparator::EQ,
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject,
+            },
+        },
+    }]))
+}
+
 /// CR 702.97a: Synthesize Scavenge into an activated ability on the card.
 ///
 /// Scavenge is an activated ability that functions only while the card with scavenge is
@@ -7634,6 +7733,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_level_up(face);
     synthesize_specialize(face);
     synthesize_cycling(face);
+    // CR 702.53a: Transmute — "[Cost], Discard this card: search your library for
+    // a card with the same mana value, reveal it, put it in hand, then shuffle.
+    // Activate only as a sorcery."
+    synthesize_transmute(face);
     synthesize_scavenge(face);
     // CR 702.128a / CR 702.129a: Embalm / Eternalize graveyard-activated
     // token-copy abilities (self-contained building block in its own module).
@@ -8890,6 +8993,111 @@ mod cycling_synthesis_tests {
         ));
         let shuffle = put_in_hand.sub_ability.as_ref().expect("shuffle");
         assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+    }
+}
+
+#[cfg(test)]
+mod transmute_synthesis_tests {
+    use super::*;
+    use crate::types::ability::ActivationRestriction;
+
+    fn transmute_face() -> CardFace {
+        CardFace {
+            keywords: vec![Keyword::Transmute(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            })],
+            ..CardFace::default()
+        }
+    }
+
+    /// CR 702.53a: `synthesize_transmute` installs one from-hand, sorcery-speed
+    /// activated ability whose cost is "{cost}, Discard this card", whose effect
+    /// searches the library for a same-mana-value card, and whose sub-ability
+    /// chain puts the found card into hand then shuffles.
+    #[test]
+    fn synthesize_transmute_builds_same_mana_value_tutor() {
+        let mut face = transmute_face();
+        synthesize_transmute(&mut face);
+
+        assert_eq!(face.abilities.len(), 1, "one transmute ability per keyword");
+        let ability = face.abilities.first().expect("transmute ability");
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        // CR 702.53b: functions only while the card is in hand.
+        assert_eq!(ability.activation_zone, Some(Zone::Hand));
+        // CR 702.53a: "Activate only as a sorcery."
+        assert!(ability.sorcery_speed);
+        assert!(ability
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+        // Transmute is NOT a cycling ability (CR 702.29 vs CR 702.53).
+        assert!(ability.ability_tag.is_none());
+
+        // Cost: Composite[Mana, Discard this card (self_ref)].
+        match &ability.cost {
+            Some(AbilityCost::Composite { costs }) => {
+                assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })));
+                assert!(costs.iter().any(|c| matches!(
+                    c,
+                    AbilityCost::Discard {
+                        self_ref: true,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }
+                )));
+            }
+            other => panic!("expected Composite cost, got {other:?}"),
+        }
+
+        // Effect: SearchLibrary with a same-mana-value-as-discarded-card filter.
+        let Effect::SearchLibrary { filter, reveal, .. } = &*ability.effect else {
+            panic!("expected SearchLibrary, got {:?}", ability.effect);
+        };
+        assert!(*reveal, "CR 702.53a: reveal that card");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject
+                        }
+                    }
+                }
+            )),
+            "filter must match a card with the same mana value as the discarded card, got {:?}",
+            tf.properties
+        );
+
+        // Sub-ability chain: put found card to hand (Library→Hand), then shuffle.
+        let put_in_hand = ability
+            .sub_ability
+            .as_ref()
+            .expect("put-in-hand sub-ability");
+        assert!(matches!(
+            &*put_in_hand.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+        let shuffle = put_in_hand
+            .sub_ability
+            .as_ref()
+            .expect("shuffle sub-ability");
+        assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+    }
+
+    #[test]
+    fn synthesize_transmute_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_transmute(&mut face);
+        assert!(face.abilities.is_empty());
     }
 }
 
