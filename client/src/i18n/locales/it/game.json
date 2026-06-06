@@ -424,6 +424,7 @@
     "one": "un {{target}}",
     "nounPlayer": "giocatore",
     "nounNonlandPermanent": "permanente non Terra",
+    "nounSpell": "magia",
     "nounCreature": "creatura",
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "permanente bersaglio",

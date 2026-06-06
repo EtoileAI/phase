@@ -426,6 +426,7 @@
     "one": "a {{target}}",
     "nounPlayer": "player",
     "nounNonlandPermanent": "nonland permanent",
+    "nounSpell": "spell",
     "nounCreature": "creature",
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "target permanent",
