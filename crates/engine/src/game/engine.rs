@@ -20854,6 +20854,81 @@ mod crew_tests {
             other => panic!("Expected CrewVehicle, got {:?}", other),
         }
     }
+
+    // CR 702.122a + CR 702.122b: A Vehicle that has become an artifact creature
+    // via Crew may contribute to crewing another Vehicle.
+    #[test]
+    fn test_crewed_vehicle_may_crew_another_vehicle() {
+        let (mut state, vehicle_a, creature_a, _creature_b) = setup_crew_scenario();
+
+        let vehicle_b = create_object(
+            &mut state,
+            CardId(204),
+            PlayerId(0),
+            "Second Vehicle".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&vehicle_b).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Vehicle".to_string());
+            obj.keywords.push(crate::types::keywords::Keyword::Crew {
+                power: 3,
+                once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+            });
+            obj.power = Some(6);
+            obj.toughness = Some(5);
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id: vehicle_a,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id: vehicle_a,
+                creature_ids: vec![creature_a],
+            },
+        )
+        .unwrap();
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+
+        assert!(
+            state
+                .objects
+                .get(&vehicle_a)
+                .unwrap()
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "Vehicle A should be an artifact creature after crew resolves"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id: vehicle_b,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::CrewVehicle {
+                eligible_creatures, ..
+            } => assert!(
+                eligible_creatures.contains(&vehicle_a),
+                "crewed Vehicle A should be eligible to crew Vehicle B"
+            ),
+            other => panic!("Expected CrewVehicle, got {:?}", other),
+        }
+    }
 }
 
 #[cfg(test)]

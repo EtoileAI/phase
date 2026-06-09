@@ -2950,6 +2950,9 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                                         c.controller == player
                                             && !c.tapped
                                             && c.card_types.core_types.contains(&CoreType::Creature)
+                                            && !crate::game::static_abilities::object_has_cant_crew(
+                                                state, cid,
+                                            )
                                     })
                             });
                             if has_eligible {
