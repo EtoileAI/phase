@@ -20658,6 +20658,30 @@ mod tests {
         assert_eq!(def.constraint, None);
     }
 
+    /// CR 603.2b + CR 608.2c: Roiling Vortex — "At the beginning of each player's
+    /// upkeep, this enchantment deals 1 damage to them." The bare player anaphor
+    /// "them" is the player whose upkeep it is — the same referent "that player"
+    /// resolves to in this trigger class (`ScopedPlayer`, which the runtime binds
+    /// to the active player at fire time). It must NOT fall back to the object
+    /// `ParentTarget` anaphor, which has no referent so the damage hits no one
+    /// (issue #2891).
+    #[test]
+    fn phase_trigger_each_players_upkeep_deals_damage_to_them() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's upkeep, this enchantment deals 1 damage to them.",
+            "Roiling Vortex",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        match def.execute.as_ref().map(|ability| ability.effect.as_ref()) {
+            Some(Effect::DealDamage { target, amount, .. }) => {
+                assert_eq!(target, &TargetFilter::ScopedPlayer);
+                assert_eq!(amount, &QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected DealDamage to ScopedPlayer, got {other:?}"),
+        }
+    }
+
     /// CR 613.1 + CR 503.1a: The Rack — "the chosen player's upkeep" must
     /// scope the phase trigger to `SourceChosenPlayer`, not every active player.
     #[test]
