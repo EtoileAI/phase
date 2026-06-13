@@ -27046,6 +27046,32 @@ mod tests {
         );
     }
 
+    /// Issue #2397 (Wall of Mourning ETB) — "exile a card from the top of your
+    /// library face down for each opponent you have" must lower to ExileTop, not
+    /// a library-wide ChangeZone choice prompt.
+    #[test]
+    fn exile_card_from_top_of_your_library_face_down_for_each_opponent() {
+        let effect = parse_effect(
+            "Exile a card from the top of your library face down for each opponent you have.",
+        );
+        assert!(
+            matches!(
+                &effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::PlayerCount {
+                            filter: crate::types::ability::PlayerFilter::Opponent,
+                        },
+                    },
+                    face_down: true,
+                }
+            ),
+            "Expected ExileTop(controller, opponents, face_down), got {:?}",
+            effect
+        );
+    }
+
     /// Issue #594 (Maralen, Fae Ascendant ETB; Court of Locthwain ETB) —
     /// "exile the top N cards of target opponent's library" must preserve
     /// the count (N) and lower the targeted-player phrase to a typed
