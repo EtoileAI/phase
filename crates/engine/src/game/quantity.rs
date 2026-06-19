@@ -658,7 +658,11 @@ pub(crate) fn resolve_quantity_for_trigger_check(
     // for hand-event triggers, etc. Without this binding, intervening-if
     // checks for `that player has X` silently resolve against the source's
     // controller and produce wrong results.
-    let resolution_event = state.current_trigger_event.as_ref().or(event);
+    // CR 603.4: The explicit `event` (stack entry / detection pass) wins over
+    // `current_trigger_event`, which may still hold a stale event from an
+    // unrelated in-flight resolution in the same step (Keeper of the Accord
+    // intervening-if at opponent end step — issue #1323).
+    let resolution_event = event.or(state.current_trigger_event.as_ref());
     let scoped_player =
         resolution_event.and_then(|e| crate::game::targeting::extract_player_from_event(e, state));
     let ctx = QuantityContext {
@@ -670,7 +674,8 @@ pub(crate) fn resolve_quantity_for_trigger_check(
 
     // Fast path: when current_trigger_event is already set (resolution-time
     // re-check in stack::resolve_top), the default resolver reads it directly.
-    if state.current_trigger_event.is_some() {
+    // Skip when an explicit override was supplied — that event is authoritative.
+    if event.is_none() && state.current_trigger_event.is_some() {
         return resolve_quantity_with_ctx(state, expr, controller, ctx);
     }
     if let Some(event) = event {
