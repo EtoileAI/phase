@@ -251,6 +251,7 @@ mod issue_2943_kayas_wrath;
 mod issue_3127_reveal_otherwise_graveyard;
 mod issue_3245_abhorrent_oculus_manifest_dread;
 mod issue_3260_phantasmal_image_persist;
+mod issue_3264_jace_mind_sculptor_minus_twelve;
 mod issue_3265_knowledge_seeker_kwain;
 mod issue_3267_sanwell_rest_on_bottom;
 mod issue_3274_elder_deep_fiend;

@@ -12181,6 +12181,7 @@ fn lower_subject_predicate_ast(
                 return wrapped;
             }
             inject_subject_target(&mut clause.effect, &subject);
+            sync_subject_into_nested_shuffle_sub(&mut clause, &subject);
             // CR 109.4 + CR 608.2c (issue #534): When the subject phrase
             // resolved to the chosen player ("That player" after a
             // `Choose(Opponent)`/`Choose(Player)`), the predicate's possessive
@@ -12788,6 +12789,50 @@ fn parse_subject_exile_top_count(pred_lower: &str) -> QuantityExpr {
 /// the imperative fallback path, where the subject was stripped before parsing.
 /// Only applies to effects with a sentinel `TargetFilter::Any` that should inherit
 /// the subject's targeting information.
+fn sync_subject_into_nested_shuffle_sub(
+    clause: &mut ParsedEffectClause,
+    subject: &SubjectPhraseAst,
+) {
+    let subject_filter = subject.target.as_ref().unwrap_or(&subject.affected);
+    if !target_filter_can_target_player(subject_filter) {
+        return;
+    }
+
+    if !matches!(
+        &clause.effect,
+        Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            ..
+        }
+    ) {
+        return;
+    }
+
+    let mut next = clause.sub_ability.as_mut();
+    while let Some(sub) = next {
+        // CR 701.24a + CR 608.2c: `lower_change_zone_all_to_library` chains
+        // `ChangeZoneAll { target: Controller }` for every additional origin
+        // zone, ending in `Shuffle { target: Controller }`. When the stripped
+        // subject is a player anaphor ("that player shuffles their hand into
+        // their library" — Jace, the Mind Sculptor −12), keep the whole
+        // mass-move/shuffle chain bound to that player.
+        match &mut *sub.effect {
+            Effect::ChangeZoneAll {
+                destination: Zone::Library,
+                target,
+                ..
+            }
+            | Effect::Shuffle { target }
+                if matches!(&*target, TargetFilter::Controller | TargetFilter::Any) =>
+            {
+                *target = subject_filter.clone();
+            }
+            _ => {}
+        }
+        next = sub.sub_ability.as_mut();
+    }
+}
+
 fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
     let subject_filter = subject.target.as_ref().unwrap_or(&subject.affected).clone();
     // CR 603.6 + CR 120.1: "that creature/permanent deals damage equal to
@@ -29074,6 +29119,53 @@ mod tests {
             &*shuffle.effect,
             Effect::Shuffle {
                 target: TargetFilter::Controller
+            }
+        ));
+    }
+
+    #[test]
+    fn compound_parent_target_shuffle_hand_and_graveyard_keeps_player_scope() {
+        let def = parse_effect_chain(
+            "Exile all cards from target player's library, then that player shuffles their hand and graveyard into their library.",
+            AbilityKind::Spell,
+        );
+
+        let hand = def
+            .sub_ability
+            .as_deref()
+            .expect("library exile should chain hand move");
+        assert!(matches!(
+            &*hand.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
+                destination: Zone::Library,
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
+
+        let graveyard = hand
+            .sub_ability
+            .as_deref()
+            .expect("hand move should chain graveyard move");
+        assert!(matches!(
+            &*graveyard.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
+
+        let shuffle = graveyard
+            .sub_ability
+            .as_deref()
+            .expect("graveyard move should chain Shuffle");
+        assert!(matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetController
             }
         ));
     }
