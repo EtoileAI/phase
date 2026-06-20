@@ -6129,11 +6129,9 @@ pub fn handle_prototype_cost_choice_with_payment_mode(
 /// `bestow_form` is set to `Some(BestowFormState)` to mark the object as in
 /// bestow form; `revert_bestow_aura_form` is the inverse operation.
 ///
-/// Idempotent: a no-op if the object is already in bestow form.
-fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObject) {
-    if obj.bestow_form.is_some() {
-        return;
-    }
+/// Idempotent: safe to re-run after printed-face rehydration or layer resets
+/// re-anchor `card_types` from a refreshed `base_card_types`.
+pub(crate) fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObject) {
     use crate::types::card_type::CoreType;
     // CR 702.103b: Remove the Creature core type while bestowed.
     obj.card_types
