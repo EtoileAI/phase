@@ -308,6 +308,7 @@ mod issue_3660_paradigm_multiple_offers;
 mod issue_3665_smugglers_share;
 mod issue_3681_inferno_titan_divided_damage;
 mod issue_3872_tithe_taker_turn_scoped_tax;
+mod issue_3873_teferi_ageless_insight_multi_draw;
 mod issue_3874_emet_selch_optional_decline;
 mod issue_3875_kozilek_graveyard_shuffle;
 mod issue_3876_gadrak_treasure_count;
