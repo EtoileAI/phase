@@ -162,7 +162,7 @@ export function AttackTargetPicker({
           {mode === "all" ? (
             /* Attack All mode: one button per target */
             <div className="flex flex-col gap-2">
-              {sortedTargets.map((target) => {
+              {commonTargets.map((target) => {
                 const color = getTargetSeatColor(target);
                 return (
                   <button

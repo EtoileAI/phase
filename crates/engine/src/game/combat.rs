@@ -1965,16 +1965,21 @@ fn extract_combat_tax_payload<'a>(
 ///    override (CR 702.3b)
 ///  - `has_summoning_sickness(obj)` (CR 302.6)
 pub fn creature_must_attack(state: &GameState, obj_id: ObjectId) -> bool {
-    let attackable_players = attackable_player_targets(state);
-    creature_must_attack_with_attackable_players(state, obj_id, &attackable_players)
+    let gates = CombatStaticGates::compute(state);
+    let broad_targets = get_valid_attack_targets(state);
+    creature_must_attack_from_broad_targets_gated(state, obj_id, &broad_targets, &gates)
 }
 
 pub fn attackable_player_targets(state: &GameState) -> Vec<PlayerId> {
     crate::game::perf_counters::record_attackable_player_sweep();
-    get_valid_attack_targets(state)
-        .into_iter()
+    attackable_players_from_targets(&get_valid_attack_targets(state))
+}
+
+fn attackable_players_from_targets(targets: &[AttackTarget]) -> Vec<PlayerId> {
+    targets
+        .iter()
         .filter_map(|target| match target {
-            AttackTarget::Player(pid) => Some(pid),
+            AttackTarget::Player(pid) => Some(*pid),
             _ => None,
         })
         .collect()
@@ -2074,6 +2079,20 @@ fn creature_must_attack_with_attackable_players_gated(
         return false;
     }
     true
+}
+
+/// CR 508.1b + CR 508.1c + CR 508.1d + CR 701.15b: "If able" must be measured
+/// against the defending players this attacker can legally be declared against
+/// after its own scoped attack restrictions are applied.
+fn creature_must_attack_from_broad_targets_gated(
+    state: &GameState,
+    obj_id: ObjectId,
+    broad_targets: &[AttackTarget],
+    gates: &CombatStaticGates,
+) -> bool {
+    let attackable_players =
+        attackable_players_for_attacker_gated(state, obj_id, broad_targets, gates);
+    creature_must_attack_with_attackable_players_gated(state, obj_id, &attackable_players, gates)
 }
 
 /// CR 702.22: Whether a creature has the banding keyword.
@@ -2329,21 +2348,36 @@ pub fn declare_attackers_with_bands(
     if !bands.is_empty() {
         validate_attack_band_declarations(state, attacks, bands)?;
     }
-    let attackable_players = attackable_player_targets(state);
+    let broad_targets = get_valid_attack_targets(state);
     // CR 604.1: hoist the combat-restriction existence gates once; every
     // per-permanent / per-attacker static check below reuses them so each loop
     // stays O(N) instead of O(N^2).
     let gates = CombatStaticGates::compute(state);
+    let attackable_players_by_attacker: HashMap<ObjectId, Vec<PlayerId>> = state
+        .battlefield
+        .iter()
+        .copied()
+        .map(|id| {
+            (
+                id,
+                attackable_players_for_attacker_gated(state, id, &broad_targets, &gates),
+            )
+        })
+        .collect();
 
     // CR 508.1d / CR 701.15b: Creatures that must attack each combat if able.
     // `creature_must_attack` is the single authority for the requirement +
     // exemption logic; this loop only adds the "already declared?" check and
     // the rejection error text.
     for &obj_id in &state.battlefield {
+        let attackable_players = attackable_players_by_attacker
+            .get(&obj_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         if !creature_must_attack_with_attackable_players_gated(
             state,
             obj_id,
-            &attackable_players,
+            attackable_players,
             &gates,
         ) {
             continue;
@@ -2528,16 +2562,9 @@ pub fn declare_attackers_with_bands(
     }
 
     // CR 701.15b: a goaded creature must attack a player other than the goading
-    // player *if able*. "Able" is measured against the players this creature
-    // could legally be declared attacking: `get_valid_attack_targets` already
-    // applies CR 506.2/506.3 plus the exclusions for the active player,
-    // eliminated players, teammates, phased-out players, and players with
-    // protection from everything. A non-goading player who is not a legal attack
-    // target (e.g. a phased-out opponent or a teammate) does not make the
-    // creature able to attack elsewhere, so attacking a goading player stays
-    // legal. The previous check counted every non-eliminated player, wrongly
-    // forcing the creature off a goading player toward a target it could not
-    // actually attack.
+    // player *if able*. "Able" is measured against the same per-attacker base
+    // target set the declare-attackers UI and helper queries use: global attack
+    // targets filtered by this creature's own scoped attack restrictions.
     for (attacker_id, target) in attacks {
         if let AttackTarget::Player(defending_pid) = target {
             let goading_players =
@@ -2545,6 +2572,10 @@ pub fn declare_attackers_with_bands(
             if goading_players.is_empty() {
                 continue;
             }
+            let attackable_players = attackable_players_by_attacker
+                .get(attacker_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             // Only enforce the redirect if a non-goading player is actually a
             // legal attack target for this creature.
             if goading_players.contains(defending_pid) {
@@ -2570,6 +2601,10 @@ pub fn declare_attackers_with_bands(
         let Some(obj) = state.objects.get(attacker_id) else {
             continue;
         };
+        let attackable_players = attackable_players_by_attacker
+            .get(attacker_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         for req_player in must_attack_players_for_creature(state, obj) {
             // Only enforce when the creature can legally attack the required player.
             if !attackable_players.contains(&req_player) {
@@ -3779,6 +3814,20 @@ fn base_valid_attack_targets_for_attacker_gated(
             attack_target_passes_scoped_restrictions(state, attacker_id, *target, gates)
         })
         .collect()
+}
+
+/// CR 508.1b + CR 508.1c: The defending players this creature can legally
+/// attack after applying its own scoped restrictions, before goad or
+/// MustAttackPlayer narrow the declaration further.
+fn attackable_players_for_attacker_gated(
+    state: &GameState,
+    attacker_id: ObjectId,
+    broad_targets: &[AttackTarget],
+    gates: &CombatStaticGates,
+) -> Vec<PlayerId> {
+    let base_targets =
+        base_valid_attack_targets_for_attacker_gated(state, attacker_id, broad_targets, gates);
+    attackable_players_from_targets(&base_targets)
 }
 
 /// CR 508.1d + CR 701.15b: Attack requirements and goad further narrow the
@@ -8441,6 +8490,78 @@ mod tests {
                 .unwrap_err()
                 .contains("must attack a different player if able"),
             "an attackable non-goading opponent (P2) must still force the redirect"
+        );
+    }
+
+    #[test]
+    fn goad_redirect_uses_per_attacker_scoped_legality() {
+        let mut state = setup_multiplayer_combat(3);
+        let goaded = create_goaded_creature(&mut state, PlayerId(2), PlayerId(1));
+        {
+            let obj = state.objects.get_mut(&goaded).unwrap();
+            obj.controller = PlayerId(0);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(TargetFilter::SelfRef)
+                    .attack_defended(Some(crate::types::triggers::AttackTargetFilter::Owner)),
+            );
+        }
+
+        assert_eq!(
+            get_valid_attack_targets_for_attacker(&state, goaded),
+            vec![AttackTarget::Player(PlayerId(1))],
+            "scoped CantAttack must remove the non-goading owner from this creature's legal targets"
+        );
+
+        let result = declare_attackers(
+            &mut state,
+            &[(goaded, AttackTarget::Player(PlayerId(1)))],
+            &mut vec![],
+        );
+        assert!(
+            result.is_ok(),
+            "with no legal non-goading player left, attacking the goader is legal: {result:?}"
+        );
+    }
+
+    #[test]
+    fn must_attack_player_uses_per_attacker_scoped_legality() {
+        let mut state = setup_multiplayer_combat(3);
+        let attacker = create_creature(&mut state, PlayerId(2), "Lured Bear", 2, 2);
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.controller = PlayerId(0);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(TargetFilter::SelfRef)
+                    .attack_defended(Some(crate::types::triggers::AttackTargetFilter::Owner)),
+            );
+            obj.static_definitions
+                .push(StaticDefinition::new(StaticMode::MustAttackPlayer {
+                    player: PlayerId(2),
+                }));
+        }
+
+        assert_eq!(
+            get_valid_attack_targets_for_attacker(&state, attacker),
+            vec![AttackTarget::Player(PlayerId(1))],
+            "the required player is globally attackable but not legal for this attacker"
+        );
+
+        let attacks_other_player = declare_attackers(
+            &mut state.clone(),
+            &[(attacker, AttackTarget::Player(PlayerId(1)))],
+            &mut vec![],
+        );
+        assert!(
+            attacks_other_player.is_ok(),
+            "MustAttackPlayer should not force an illegal target when scoped CantAttack removes it"
+        );
+
+        let omitted = declare_attackers(&mut state, &[], &mut vec![]);
+        assert!(
+            omitted.is_ok(),
+            "MustAttackPlayer should not force this attacker to attack when the required player is not legal"
         );
     }
 
