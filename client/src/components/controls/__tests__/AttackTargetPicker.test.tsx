@@ -7,14 +7,15 @@ import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { AttackTargetPicker } from "../AttackTargetPicker.tsx";
 
 vi.mock("framer-motion", async (importOriginal) => {
-  const React = await import("react");
   const actual = await importOriginal<typeof import("framer-motion")>();
   return {
     ...actual,
-    AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+    AnimatePresence: ({ children }: { children: import("react").ReactNode }) => <>{children}</>,
     motion: {
-      div: ({ children, ...props }: React.HTMLAttributes<HTMLDivElement>) => <div {...props}>{children}</div>,
-      button: ({ children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
+      div: ({ children, ...props }: import("react").HTMLAttributes<HTMLDivElement>) => (
+        <div {...props}>{children}</div>
+      ),
+      button: ({ children, ...props }: import("react").ButtonHTMLAttributes<HTMLButtonElement>) => (
         <button {...props}>{children}</button>
       ),
     },

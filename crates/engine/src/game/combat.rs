@@ -3862,14 +3862,14 @@ fn valid_attack_targets_for_attacker_from_base(
         .copied()
         .filter(|target| {
             if let AttackTarget::Player(defending_pid) = target {
-                if has_attackable_non_goading_player && goading_players.contains(&defending_pid) {
+                if has_attackable_non_goading_player && goading_players.contains(defending_pid) {
                     return false;
                 }
             }
             if required_players.is_empty() {
                 return true;
             }
-            matches!(target, AttackTarget::Player(pid) if required_players.contains(&pid))
+            matches!(target, AttackTarget::Player(pid) if required_players.contains(pid))
         })
         .collect()
 }

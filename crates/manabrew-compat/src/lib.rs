@@ -2135,6 +2135,7 @@ mod tests {
                     player: PlayerId(0),
                     valid_attacker_ids: vec![],
                     valid_attack_targets: vec![],
+                    valid_attack_targets_by_attacker: HashMap::new(),
                 },
             ),
             (

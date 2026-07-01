@@ -78,7 +78,7 @@ export function getValidAttackTargetsForAttacker(
   if (wf.data.valid_attack_targets_by_attacker) {
     return wf.data.valid_attack_targets_by_attacker[String(attackerId)] ?? [];
   }
-  return wf.data.valid_attack_targets;
+  return wf.data.valid_attack_targets ?? [];
 }
 
 function getDefaultAttackTargetForAttacker(

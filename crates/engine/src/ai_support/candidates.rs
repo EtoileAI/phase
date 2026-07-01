@@ -3583,7 +3583,7 @@ fn attacker_actions(
                 valid_attacker_ids.iter().all(|id| {
                     valid_attack_targets_by_attacker
                         .get(id)
-                        .is_none_or(|targets| targets.contains(&target))
+                        .is_none_or(|targets| targets.contains(target))
                 })
             })
             .collect();
