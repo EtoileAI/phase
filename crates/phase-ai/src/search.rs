@@ -3629,6 +3629,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![creature],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: std::collections::HashMap::new(),
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -3661,6 +3662,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![creature],
             valid_attack_targets: vec![target],
+            valid_attack_targets_by_attacker: std::collections::HashMap::new(),
         };
 
         let action = validated_declare_attackers(&state, vec![(creature, target)]);

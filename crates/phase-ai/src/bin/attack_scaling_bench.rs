@@ -60,6 +60,7 @@ fn bench_n(n: usize) {
         player: P0,
         valid_attacker_ids,
         valid_attack_targets,
+        valid_attack_targets_by_attacker: std::collections::HashMap::new(),
     };
 
     let at_declare = matches!(
