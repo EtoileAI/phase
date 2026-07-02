@@ -1177,6 +1177,7 @@ fn build_3p_propaganda_scenario(propaganda_owner: PlayerId) -> (GameRunner, Obje
         player: P1,
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(P0), AttackTarget::Player(PlayerId(2))],
+        valid_attack_targets_by_attacker: std::collections::HashMap::new(),
     };
     (runner, attacker)
 }

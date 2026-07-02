@@ -1496,6 +1496,7 @@ mod tests {
             player: PlayerId(1),
             valid_attacker_ids: Vec::new(),
             valid_attack_targets: Vec::new(),
+            valid_attack_targets_by_attacker: std::collections::HashMap::new(),
         };
         // Acting player gets the full result (matches `legal_actions_full`).
         let acting = legal_actions_for_viewer(&state, PlayerId(1));
